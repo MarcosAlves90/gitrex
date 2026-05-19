@@ -1,5 +1,6 @@
 mod app;
 mod layout;
+mod operations;
 mod theme;
 mod widgets;
 

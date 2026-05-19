@@ -3,8 +3,6 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
 
 use crate::{
     cli::output,
@@ -12,7 +10,11 @@ use crate::{
     git::GitClient,
 };
 
-use super::{layout, theme, widgets};
+use super::{
+    layout,
+    operations::{build_snapshot, GitOperationRunner, OperationOutcome, OperationRequest, RepoSnapshot},
+    theme, widgets,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -27,48 +29,6 @@ pub enum MessageKind {
     Success,
     Warning,
     Error,
-}
-
-#[derive(Debug)]
-enum OperationRequest {
-    Checkout { branch: String },
-    Switch { branch: String },
-    Pull {
-        remote: Option<String>,
-        branch: Option<String>,
-    },
-    Push {
-        remote: Option<String>,
-        branch: Option<String>,
-    },
-}
-
-impl OperationRequest {
-    fn label(&self) -> &'static str {
-        match self {
-            OperationRequest::Checkout { .. } => "Checking out branch",
-            OperationRequest::Switch { .. } => "Switching branch",
-            OperationRequest::Pull { .. } => "Pulling changes",
-            OperationRequest::Push { .. } => "Pushing changes",
-        }
-    }
-}
-
-#[derive(Debug)]
-struct RepoSnapshot {
-    status: Option<RepoStatus>,
-    branches: Vec<BranchInfo>,
-    log: Vec<CommitSummary>,
-    selected_branch: usize,
-}
-
-#[derive(Debug)]
-enum OperationOutcome {
-    Success {
-        snapshot: RepoSnapshot,
-        message: String,
-    },
-    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,13 +60,15 @@ pub struct App {
     picker_open: bool,
     picker_index: usize,
     loading: Option<String>,
-    operation_rx: Option<Receiver<OperationOutcome>>,
+    operation_rx: Option<std::sync::mpsc::Receiver<OperationOutcome>>,
+    runner: GitOperationRunner,
     message: String,
     message_kind: MessageKind,
 }
 
 impl App {
     pub fn new(client: GitClient) -> Self {
+        let runner = GitOperationRunner::new(<GitClient as Clone>::clone(&client));
         Self {
             client,
             view: View::Branches,
@@ -118,13 +80,14 @@ impl App {
             picker_index: 0,
             loading: None,
             operation_rx: None,
+            runner,
             message: String::from("Press q to quit, r to refresh, a for branch actions."),
             message_kind: MessageKind::Info,
         }
     }
 
     pub fn refresh(&mut self) -> anyhow::Result<()> {
-        let snapshot = self.load_snapshot()?;
+        let snapshot = build_snapshot(&self.client).map_err(anyhow::Error::msg)?;
         self.apply_snapshot(snapshot);
         self.message = String::from("Repository refreshed.");
         self.message_kind = MessageKind::Success;
@@ -297,16 +260,9 @@ impl App {
 
         let operation = self.build_operation(action)?;
         let label = operation.label().to_string();
-        let client = <GitClient as Clone>::clone(&self.client);
-        let (tx, rx) = mpsc::channel();
         self.loading = Some(label.clone());
-        self.operation_rx = Some(rx);
+        self.operation_rx = Some(self.runner.spawn(operation));
         self.set_feedback(format!("{label}..."), MessageKind::Info);
-
-        thread::spawn(move || {
-            let outcome = execute_operation(client, operation);
-            let _ = tx.send(outcome);
-        });
 
         Ok(())
     }
@@ -344,28 +300,6 @@ impl App {
         }
     }
 
-    fn load_snapshot(&self) -> anyhow::Result<RepoSnapshot> {
-        let status = self.client.status()?;
-        let branches = self.client.branches()?;
-        let log = self.client.log(12)?;
-        let selected_branch = branches
-            .iter()
-            .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
-            .or_else(|| {
-                branches
-                    .iter()
-                    .position(|branch| matches!(branch.kind, crate::domain::BranchKind::Local) && branch.name == status.branch_name)
-            })
-            .unwrap_or(0);
-
-        Ok(RepoSnapshot {
-            status: Some(status),
-            branches,
-            log,
-            selected_branch,
-        })
-    }
-
     fn apply_snapshot(&mut self, snapshot: RepoSnapshot) {
         self.status = snapshot.status;
         self.branches = snapshot.branches;
@@ -397,8 +331,8 @@ impl App {
 
         match rx.try_recv() {
             Ok(outcome) => self.finish_operation(outcome),
-            Err(TryRecvError::Empty) => Ok(()),
-            Err(TryRecvError::Disconnected) => {
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(()),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.loading = None;
                 self.operation_rx = None;
                 self.set_feedback("Operation aborted unexpectedly.", MessageKind::Error);
@@ -603,57 +537,6 @@ enum Intent {
     ClosePicker,
     MovePicker(isize),
     ConfirmPicker,
-}
-
-fn execute_operation(client: GitClient, request: OperationRequest) -> OperationOutcome {
-    let result = match request {
-        OperationRequest::Checkout { branch } => client
-            .checkout(&branch)
-            .map(|_| format!("Checked out {branch}")),
-        OperationRequest::Switch { branch } => client
-            .switch(&branch)
-            .map(|_| format!("Switched to {branch}")),
-        OperationRequest::Pull { remote, branch } => client
-            .pull(remote.as_deref(), branch.as_deref())
-            .map(|_| String::from("Pull complete.")),
-        OperationRequest::Push { remote, branch } => client
-            .push(remote.as_deref(), branch.as_deref())
-            .map(|_| String::from("Push complete.")),
-    };
-
-    match result {
-        Ok(message) => match client.status() {
-            Ok(status) => match client.branches() {
-                Ok(branches) => match client.log(12) {
-                    Ok(log) => {
-                        let selected_branch = branches
-                            .iter()
-                            .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
-                            .or_else(|| {
-                                branches
-                                    .iter()
-                                    .position(|branch| matches!(branch.kind, crate::domain::BranchKind::Local) && branch.name == status.branch_name)
-                            })
-                            .unwrap_or(0);
-
-                        OperationOutcome::Success {
-                            snapshot: RepoSnapshot {
-                                status: Some(status),
-                                branches,
-                                log,
-                                selected_branch,
-                            },
-                            message,
-                        }
-                    }
-                    Err(error) => OperationOutcome::Error(error.to_string()),
-                },
-                Err(error) => OperationOutcome::Error(error.to_string()),
-            },
-            Err(error) => OperationOutcome::Error(error.to_string()),
-        },
-        Err(error) => OperationOutcome::Error(error.to_string()),
-    }
 }
 
 #[cfg(test)]
