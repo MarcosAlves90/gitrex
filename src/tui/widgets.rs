@@ -14,10 +14,7 @@ pub fn actions_copy(selected_branch: Option<&str>) -> String {
         "Keys:",
         "j/k or arrows = move",
         "1/2/3 = change pane",
-        "Enter/c = checkout branch",
-        "s = switch branch",
-        "p = pull current branch",
-        "P = push current branch",
+        "a = open branch actions",
         "r = refresh",
         "q = quit",
         "",
@@ -43,6 +40,6 @@ mod tests {
     fn actions_copy_mentions_selected_branch() {
         let copy = actions_copy(Some("feature/login"));
         assert!(copy.contains("feature/login"));
-        assert!(copy.contains("Enter/c = checkout branch"));
+        assert!(copy.contains("a = open branch actions"));
     }
 }

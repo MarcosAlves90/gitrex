@@ -1,7 +1,7 @@
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 use crate::{
@@ -28,16 +28,22 @@ pub enum MessageKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Intent {
-    None,
-    Quit,
-    Refresh,
-    SelectView(View),
-    MoveSelection(isize),
-    CheckoutSelected,
-    SwitchSelected,
-    PullCurrent,
-    PushCurrent,
+pub enum PickerAction {
+    Checkout,
+    Switch,
+    Pull,
+    Push,
+}
+
+impl PickerAction {
+    fn label(self) -> &'static str {
+        match self {
+            PickerAction::Checkout => "checkout branch",
+            PickerAction::Switch => "switch branch",
+            PickerAction::Pull => "pull current branch",
+            PickerAction::Push => "push current branch",
+        }
+    }
 }
 
 pub struct App {
@@ -47,6 +53,8 @@ pub struct App {
     branches: Vec<BranchInfo>,
     log: Vec<CommitSummary>,
     selected_branch: usize,
+    picker_open: bool,
+    picker_index: usize,
     message: String,
     message_kind: MessageKind,
 }
@@ -60,7 +68,9 @@ impl App {
             branches: Vec::new(),
             log: Vec::new(),
             selected_branch: 0,
-            message: String::from("Press q to quit, r to refresh."),
+            picker_open: false,
+            picker_index: 0,
+            message: String::from("Press q to quit, r to refresh, a for branch actions."),
             message_kind: MessageKind::Info,
         }
     }
@@ -70,9 +80,9 @@ impl App {
         self.branches = self.client.branches()?;
         self.log = self.client.log(12)?;
         self.selected_branch = self
-            .branches
+            .local_branches()
             .iter()
-            .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
+            .position(|branch| branch.current)
             .unwrap_or(0);
         self.message = String::from("Repository refreshed.");
         self.message_kind = MessageKind::Success;
@@ -100,6 +110,10 @@ impl App {
         self.local_branches().get(self.selected_branch).copied()
     }
 
+    pub fn picker_is_open(&self) -> bool {
+        self.picker_open
+    }
+
     fn local_branches(&self) -> Vec<&BranchInfo> {
         self.branches
             .iter()
@@ -107,7 +121,27 @@ impl App {
             .collect()
     }
 
+    fn picker_actions(&self) -> &'static [PickerAction] {
+        const ACTIONS: &[PickerAction] = &[
+            PickerAction::Checkout,
+            PickerAction::Switch,
+            PickerAction::Pull,
+            PickerAction::Push,
+        ];
+        ACTIONS
+    }
+
     fn intent_for_key(&self, key: KeyEvent) -> Intent {
+        if self.picker_open {
+            return match key.code {
+                KeyCode::Esc => Intent::ClosePicker,
+                KeyCode::Enter => Intent::ConfirmPicker,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MovePicker(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MovePicker(-1),
+                _ => Intent::None,
+            };
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Intent::Quit,
             KeyCode::Char('r') => Intent::Refresh,
@@ -116,10 +150,7 @@ impl App {
             KeyCode::Char('3') => Intent::SelectView(View::Log),
             KeyCode::Char('j') | KeyCode::Down => Intent::MoveSelection(1),
             KeyCode::Char('k') | KeyCode::Up => Intent::MoveSelection(-1),
-            KeyCode::Enter | KeyCode::Char('c') => Intent::CheckoutSelected,
-            KeyCode::Char('s') => Intent::SwitchSelected,
-            KeyCode::Char('p') => Intent::PullCurrent,
-            KeyCode::Char('P') => Intent::PushCurrent,
+            KeyCode::Char('a') => Intent::OpenPicker,
             _ => Intent::None,
         }
     }
@@ -140,20 +171,20 @@ impl App {
                 self.move_selection(delta);
                 Ok(false)
             }
-            Intent::CheckoutSelected => {
-                self.checkout_selected()?;
+            Intent::OpenPicker => {
+                self.open_picker();
                 Ok(false)
             }
-            Intent::SwitchSelected => {
-                self.switch_selected()?;
+            Intent::ClosePicker => {
+                self.close_picker();
                 Ok(false)
             }
-            Intent::PullCurrent => {
-                self.pull_current()?;
+            Intent::MovePicker(delta) => {
+                self.move_picker(delta);
                 Ok(false)
             }
-            Intent::PushCurrent => {
-                self.push_current()?;
+            Intent::ConfirmPicker => {
+                self.confirm_picker()?;
                 Ok(false)
             }
         }
@@ -173,6 +204,53 @@ impl App {
         };
 
         self.selected_branch = next.min(branch_count.saturating_sub(1));
+    }
+
+    fn open_picker(&mut self) {
+        if self.selected_branch().is_none() {
+            self.set_feedback("No branch selected.", MessageKind::Warning);
+            return;
+        }
+        self.picker_open = true;
+        self.picker_index = 0;
+        self.message = "Choose an action for the selected branch.".to_string();
+        self.message_kind = MessageKind::Info;
+    }
+
+    fn close_picker(&mut self) {
+        self.picker_open = false;
+    }
+
+    fn move_picker(&mut self, delta: isize) {
+        let count = self.picker_actions().len();
+        if count == 0 {
+            return;
+        }
+
+        let next = if delta.is_negative() {
+            self.picker_index.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.picker_index.saturating_add(delta as usize)
+        };
+        self.picker_index = next.min(count.saturating_sub(1));
+    }
+
+    fn confirm_picker(&mut self) -> anyhow::Result<()> {
+        let action = *self
+            .picker_actions()
+            .get(self.picker_index)
+            .unwrap_or(&PickerAction::Checkout);
+        self.close_picker();
+        self.perform_action(action)
+    }
+
+    fn perform_action(&mut self, action: PickerAction) -> anyhow::Result<()> {
+        match action {
+            PickerAction::Checkout => self.checkout_selected(),
+            PickerAction::Switch => self.switch_selected(),
+            PickerAction::Pull => self.pull_current(),
+            PickerAction::Push => self.push_current(),
+        }
     }
 
     fn checkout_selected(&mut self) -> anyhow::Result<()> {
@@ -233,6 +311,12 @@ impl App {
         frame.render_widget(self.render_log(), right);
         frame.render_widget(self.render_actions(), actions);
         frame.render_widget(self.render_footer(), footer);
+        if self.picker_open {
+            let popup = self.render_picker();
+            let area = layout::centered_rect(60, 50, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(popup, area);
+        }
     }
 
     fn render_header(&self) -> Paragraph<'_> {
@@ -276,6 +360,7 @@ impl App {
     }
 
     fn render_branches(&self) -> List<'_> {
+        let selected = self.selected_branch.min(self.local_branches().len().saturating_sub(1));
         let items = self
             .local_branches()
             .into_iter()
@@ -304,7 +389,7 @@ impl App {
             .highlight_symbol("▶ ")
             .block(
                 Block::default()
-                    .title("Branches")
+                    .title(format!("Branches ({}/{})", selected.saturating_add(1), self.local_branches().len().max(1)))
                     .title_style(Style::default().fg(theme::ACCENT))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::ACCENT)),
@@ -359,6 +444,30 @@ impl App {
             )
     }
 
+    fn render_picker(&self) -> Paragraph<'_> {
+        let branch = self.selected_branch().map(|branch| branch.name.as_str()).unwrap_or("unknown");
+        let options = self
+            .picker_actions()
+            .iter()
+            .enumerate()
+            .map(|(index, action)| {
+                let prefix = if index == self.picker_index { "▶" } else { " " };
+                format!("{prefix} {}", action.label())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Paragraph::new(format!("Branch: {branch}\n\n{options}\n\nEnter = confirm • Esc = close"))
+            .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+            .block(
+                Block::default()
+                    .title("Branch Actions")
+                    .title_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::ACCENT)),
+            )
+    }
+
     fn branch_state(&self) -> ListState {
         let mut state = ListState::default();
         if !self.local_branches().is_empty() {
@@ -368,9 +477,22 @@ impl App {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Intent {
+    None,
+    Quit,
+    Refresh,
+    SelectView(View),
+    MoveSelection(isize),
+    OpenPicker,
+    ClosePicker,
+    MovePicker(isize),
+    ConfirmPicker,
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{App, Intent, MessageKind, View};
+    use super::{App, Intent, MessageKind, PickerAction, View};
     use crate::{
         domain::{BranchInfo, BranchKind},
         git::GitClient,
@@ -378,20 +500,22 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
-    fn key_map_goes_to_branch_actions() {
+    fn key_map_opens_picker_for_branch_actions() {
         let app = App::new(GitClient::new());
         assert_eq!(
-            app.intent_for_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
-            Intent::MoveSelection(1)
+            app.intent_for_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Intent::OpenPicker
         );
         assert_eq!(
-            app.intent_for_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
-            Intent::CheckoutSelected
+            app.intent_for_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Intent::Quit
         );
-        assert_eq!(
-            app.intent_for_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE)),
-            Intent::PushCurrent
-        );
+    }
+
+    #[test]
+    fn picker_action_labels_are_clear() {
+        assert_eq!(PickerAction::Checkout.label(), "checkout branch");
+        assert_eq!(PickerAction::Push.label(), "push current branch");
     }
 
     #[test]
@@ -433,5 +557,44 @@ mod tests {
 
         app.move_selection(-1);
         assert_eq!(app.selected_branch().unwrap().name, "main");
+    }
+
+    #[test]
+    fn picker_opens_and_closes() {
+        let mut app = App::new(GitClient::new());
+        app.branches = vec![BranchInfo {
+            name: "main".to_string(),
+            current: true,
+            upstream: None,
+            commit: "abc".to_string(),
+            subject: "init".to_string(),
+            kind: BranchKind::Local,
+        }];
+
+        app.open_picker();
+        assert!(app.picker_is_open());
+        app.close_picker();
+        assert!(!app.picker_is_open());
+    }
+
+    #[test]
+    fn picker_state_changes_with_escape_and_confirm() {
+        let mut app = App::new(GitClient::new());
+        app.branches = vec![BranchInfo {
+            name: "main".to_string(),
+            current: true,
+            upstream: None,
+            commit: "abc".to_string(),
+            subject: "init".to_string(),
+            kind: BranchKind::Local,
+        }];
+
+        app.open_picker();
+        assert!(app.picker_is_open());
+        assert!(!app.handle_event(crossterm::event::Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))).unwrap());
+        assert!(!app.picker_is_open());
     }
 }
