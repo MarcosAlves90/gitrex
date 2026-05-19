@@ -21,12 +21,35 @@ pub enum OperationRequest {
 }
 
 impl OperationRequest {
-    pub fn label(&self) -> &'static str {
+    pub fn loading_label(&self) -> String {
         match self {
-            OperationRequest::Checkout { .. } => "Checking out branch",
-            OperationRequest::Switch { .. } => "Switching branch",
-            OperationRequest::Pull { .. } => "Pulling changes",
-            OperationRequest::Push { .. } => "Pushing changes",
+            OperationRequest::Checkout { branch } => format!("Checking out {branch}"),
+            OperationRequest::Switch { branch } => format!("Switching to {branch}"),
+            OperationRequest::Pull { remote, branch } | OperationRequest::Push { remote, branch } => {
+                match (remote.as_deref(), branch.as_deref()) {
+                    (Some(remote), Some(branch)) => format!("{remote}/{branch}"),
+                    _ => String::from("current branch"),
+                }
+            }
+        }
+    }
+
+    pub fn success_label(&self) -> String {
+        match self {
+            OperationRequest::Checkout { branch } => format!("Checked out {branch}"),
+            OperationRequest::Switch { branch } => format!("Switched to {branch}"),
+            OperationRequest::Pull { remote, branch } => {
+                match (remote.as_deref(), branch.as_deref()) {
+                    (Some(remote), Some(branch)) => format!("Pulled {remote}/{branch}"),
+                    _ => String::from("Pull complete."),
+                }
+            }
+            OperationRequest::Push { remote, branch } => {
+                match (remote.as_deref(), branch.as_deref()) {
+                    (Some(remote), Some(branch)) => format!("Pushed {remote}/{branch}"),
+                    _ => String::from("Push complete."),
+                }
+            }
         }
     }
 }
@@ -94,6 +117,7 @@ pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
 }
 
 fn execute_operation(client: GitClient, request: OperationRequest) -> OperationOutcome {
+    let success_message = request.success_label();
     let result = match request {
         OperationRequest::Checkout { branch } => client
             .checkout(&branch)
@@ -110,8 +134,11 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
     };
 
     match result {
-        Ok(message) => match build_snapshot(&client) {
-            Ok(snapshot) => OperationOutcome::Success { snapshot, message },
+        Ok(_) => match build_snapshot(&client) {
+            Ok(snapshot) => OperationOutcome::Success {
+                snapshot,
+                message: success_message,
+            },
             Err(error) => OperationOutcome::Error(error),
         },
         Err(error) => OperationOutcome::Error(error.to_string()),
@@ -124,7 +151,7 @@ mod tests {
 
     #[test]
     fn request_labels_are_clear() {
-        assert_eq!(OperationRequest::Checkout { branch: "main".into() }.label(), "Checking out branch");
-        assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.label(), "Pulling changes");
+        assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.loading_label(), "origin/main");
+        assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.success_label(), "Pulled origin/main");
     }
 }

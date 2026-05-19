@@ -85,7 +85,7 @@ impl TuiController {
         }
 
         let operation = self.build_operation(action)?;
-        let label = operation.label().to_string();
+        let label = operation.loading_label();
         self.app.start_loading(label.clone());
         self.operation_rx = Some(self.runner.spawn(operation));
         self.app.set_feedback(format!("{label}..."), MessageKind::Info);

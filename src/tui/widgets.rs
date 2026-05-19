@@ -8,8 +8,9 @@ pub fn mode_label(view: View) -> &'static str {
     }
 }
 
-pub fn actions_copy(selected_branch: Option<&str>) -> String {
+pub fn actions_copy(selected_branch: Option<&str>, sync_target: Option<&str>) -> String {
     let branch = selected_branch.unwrap_or("no branch selected");
+    let sync = sync_target.unwrap_or("no upstream");
     [
         "Keys:",
         "j/k or arrows = move",
@@ -20,6 +21,8 @@ pub fn actions_copy(selected_branch: Option<&str>) -> String {
         "",
         "Selected branch:",
         branch,
+        "Sync target:",
+        sync,
     ]
     .join("\n")
 }
@@ -38,8 +41,9 @@ mod tests {
 
     #[test]
     fn actions_copy_mentions_selected_branch() {
-        let copy = actions_copy(Some("feature/login"));
+        let copy = actions_copy(Some("feature/login"), Some("origin/feature/login"));
         assert!(copy.contains("feature/login"));
         assert!(copy.contains("Enter = open branch actions"));
+        assert!(copy.contains("origin/feature/login"));
     }
 }

@@ -103,6 +103,11 @@ impl App {
         ACTIONS
     }
 
+    pub fn sync_target_display(&self) -> Option<String> {
+        self.current_sync_target()
+            .map(|(remote, branch)| format!("{remote}/{branch}"))
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
         let branch_count = self.local_branches().len();
         if branch_count == 0 {
@@ -302,7 +307,12 @@ impl App {
     }
 
     fn render_actions(&self) -> Paragraph<'_> {
-        Paragraph::new(widgets::actions_copy(self.selected_branch().map(|b| b.name.as_str())))
+        Paragraph::new(
+            widgets::actions_copy(
+                self.selected_branch().map(|b| b.name.as_str()),
+                self.sync_target_display().as_deref(),
+            ),
+        )
             .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT))
             .block(
                 Block::default()
@@ -339,6 +349,9 @@ impl App {
             .selected_branch()
             .map(|branch| branch.name.as_str())
             .unwrap_or("unknown");
+        let sync_target = self
+            .sync_target_display()
+            .unwrap_or_else(|| "no upstream".to_string());
         let options = self
             .picker_actions()
             .iter()
@@ -350,7 +363,9 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Paragraph::new(format!("Branch: {branch}\n\n{options}\n\nEnter = confirm • Esc = close"))
+        Paragraph::new(format!(
+            "Branch: {branch}\nSync target: {sync_target}\n\n{options}\n\nEnter = confirm • Esc = close"
+        ))
             .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
             .block(
                 Block::default()
