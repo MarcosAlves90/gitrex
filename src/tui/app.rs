@@ -3,6 +3,8 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 
 use crate::{
     cli::output,
@@ -25,6 +27,48 @@ pub enum MessageKind {
     Success,
     Warning,
     Error,
+}
+
+#[derive(Debug)]
+enum OperationRequest {
+    Checkout { branch: String },
+    Switch { branch: String },
+    Pull {
+        remote: Option<String>,
+        branch: Option<String>,
+    },
+    Push {
+        remote: Option<String>,
+        branch: Option<String>,
+    },
+}
+
+impl OperationRequest {
+    fn label(&self) -> &'static str {
+        match self {
+            OperationRequest::Checkout { .. } => "Checking out branch",
+            OperationRequest::Switch { .. } => "Switching branch",
+            OperationRequest::Pull { .. } => "Pulling changes",
+            OperationRequest::Push { .. } => "Pushing changes",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RepoSnapshot {
+    status: Option<RepoStatus>,
+    branches: Vec<BranchInfo>,
+    log: Vec<CommitSummary>,
+    selected_branch: usize,
+}
+
+#[derive(Debug)]
+enum OperationOutcome {
+    Success {
+        snapshot: RepoSnapshot,
+        message: String,
+    },
+    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +99,8 @@ pub struct App {
     selected_branch: usize,
     picker_open: bool,
     picker_index: usize,
+    loading: Option<String>,
+    operation_rx: Option<Receiver<OperationOutcome>>,
     message: String,
     message_kind: MessageKind,
 }
@@ -70,20 +116,16 @@ impl App {
             selected_branch: 0,
             picker_open: false,
             picker_index: 0,
+            loading: None,
+            operation_rx: None,
             message: String::from("Press q to quit, r to refresh, a for branch actions."),
             message_kind: MessageKind::Info,
         }
     }
 
     pub fn refresh(&mut self) -> anyhow::Result<()> {
-        self.status = Some(self.client.status()?);
-        self.branches = self.client.branches()?;
-        self.log = self.client.log(12)?;
-        self.selected_branch = self
-            .local_branches()
-            .iter()
-            .position(|branch| branch.current)
-            .unwrap_or(0);
+        let snapshot = self.load_snapshot()?;
+        self.apply_snapshot(snapshot);
         self.message = String::from("Repository refreshed.");
         self.message_kind = MessageKind::Success;
         Ok(())
@@ -99,6 +141,7 @@ impl App {
     }
 
     pub fn handle_event(&mut self, event: Event) -> anyhow::Result<bool> {
+        self.poll_operation()?;
         let intent = match event {
             Event::Key(key) => self.intent_for_key(key),
             _ => Intent::None,
@@ -237,16 +280,7 @@ impl App {
             .get(self.picker_index)
             .unwrap_or(&PickerAction::Checkout);
         self.close_picker();
-        self.perform_action(action)
-    }
-
-    fn perform_action(&mut self, action: PickerAction) -> anyhow::Result<()> {
-        match action {
-            PickerAction::Checkout => self.checkout_selected(),
-            PickerAction::Switch => self.switch_selected(),
-            PickerAction::Pull => self.pull_current(),
-            PickerAction::Push => self.push_current(),
-        }
+        self.start_operation(action)
     }
 
     fn current_sync_target(&self) -> Option<(String, String)> {
@@ -256,56 +290,121 @@ impl App {
         Some((remote.to_string(), status.branch_name.clone()))
     }
 
-    fn checkout_selected(&mut self) -> anyhow::Result<()> {
-        let branch = match self.selected_branch() {
-            Some(branch) => branch.name.clone(),
-            None => {
-                self.set_feedback("No branch selected.", MessageKind::Warning);
-                return Ok(());
+    fn start_operation(&mut self, action: PickerAction) -> anyhow::Result<()> {
+        if self.loading.is_some() {
+            return Ok(());
+        }
+
+        let operation = self.build_operation(action)?;
+        let label = operation.label().to_string();
+        let client = <GitClient as Clone>::clone(&self.client);
+        let (tx, rx) = mpsc::channel();
+        self.loading = Some(label.clone());
+        self.operation_rx = Some(rx);
+        self.set_feedback(format!("{label}..."), MessageKind::Info);
+
+        thread::spawn(move || {
+            let outcome = execute_operation(client, operation);
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    fn build_operation(&self, action: PickerAction) -> anyhow::Result<OperationRequest> {
+        match action {
+            PickerAction::Checkout => {
+                let branch = self
+                    .selected_branch()
+                    .map(|branch| branch.name.clone())
+                    .ok_or_else(|| anyhow::anyhow!("No branch selected."))?;
+                Ok(OperationRequest::Checkout { branch })
             }
+            PickerAction::Switch => {
+                let branch = self
+                    .selected_branch()
+                    .map(|branch| branch.name.clone())
+                    .ok_or_else(|| anyhow::anyhow!("No branch selected."))?;
+                Ok(OperationRequest::Switch { branch })
+            }
+            PickerAction::Pull => {
+                let sync = self.current_sync_target();
+                let (remote, branch) = sync
+                    .map(|(remote, branch)| (Some(remote), Some(branch)))
+                    .unwrap_or((None, None));
+                Ok(OperationRequest::Pull { remote, branch })
+            }
+            PickerAction::Push => {
+                let sync = self.current_sync_target();
+                let (remote, branch) = sync
+                    .map(|(remote, branch)| (Some(remote), Some(branch)))
+                    .unwrap_or((None, None));
+                Ok(OperationRequest::Push { remote, branch })
+            }
+        }
+    }
+
+    fn load_snapshot(&self) -> anyhow::Result<RepoSnapshot> {
+        let status = self.client.status()?;
+        let branches = self.client.branches()?;
+        let log = self.client.log(12)?;
+        let selected_branch = branches
+            .iter()
+            .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
+            .or_else(|| {
+                branches
+                    .iter()
+                    .position(|branch| matches!(branch.kind, crate::domain::BranchKind::Local) && branch.name == status.branch_name)
+            })
+            .unwrap_or(0);
+
+        Ok(RepoSnapshot {
+            status: Some(status),
+            branches,
+            log,
+            selected_branch,
+        })
+    }
+
+    fn apply_snapshot(&mut self, snapshot: RepoSnapshot) {
+        self.status = snapshot.status;
+        self.branches = snapshot.branches;
+        self.log = snapshot.log;
+        self.selected_branch = snapshot.selected_branch;
+    }
+
+    fn finish_operation(&mut self, outcome: OperationOutcome) -> anyhow::Result<()> {
+        self.loading = None;
+        self.operation_rx = None;
+
+        match outcome {
+            OperationOutcome::Success { snapshot, message } => {
+                self.apply_snapshot(snapshot);
+                self.set_feedback(message, MessageKind::Success);
+            }
+            OperationOutcome::Error(message) => {
+                self.set_feedback(message, MessageKind::Error);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn poll_operation(&mut self) -> anyhow::Result<()> {
+        let Some(rx) = self.operation_rx.as_ref() else {
+            return Ok(());
         };
 
-        self.client.checkout(&branch)?;
-        self.refresh()?;
-        self.set_feedback(format!("Checked out {branch}"), MessageKind::Success);
-        Ok(())
-    }
-
-    fn switch_selected(&mut self) -> anyhow::Result<()> {
-        let branch = match self.selected_branch() {
-            Some(branch) => branch.name.clone(),
-            None => {
-                self.set_feedback("No branch selected.", MessageKind::Warning);
-                return Ok(());
+        match rx.try_recv() {
+            Ok(outcome) => self.finish_operation(outcome),
+            Err(TryRecvError::Empty) => Ok(()),
+            Err(TryRecvError::Disconnected) => {
+                self.loading = None;
+                self.operation_rx = None;
+                self.set_feedback("Operation aborted unexpectedly.", MessageKind::Error);
+                Ok(())
             }
-        };
-
-        self.client.switch(&branch)?;
-        self.refresh()?;
-        self.set_feedback(format!("Switched to {branch}"), MessageKind::Success);
-        Ok(())
-    }
-
-    fn pull_current(&mut self) -> anyhow::Result<()> {
-        if let Some((remote, branch)) = self.current_sync_target() {
-            self.client.pull(Some(remote.as_str()), Some(branch.as_str()))?;
-        } else {
-            self.client.pull(None, None)?;
         }
-        self.refresh()?;
-        self.set_feedback("Pull complete.", MessageKind::Success);
-        Ok(())
-    }
-
-    fn push_current(&mut self) -> anyhow::Result<()> {
-        if let Some((remote, branch)) = self.current_sync_target() {
-            self.client.push(Some(remote.as_str()), Some(branch.as_str()))?;
-        } else {
-            self.client.push(None, None)?;
-        }
-        self.refresh()?;
-        self.set_feedback("Push complete.", MessageKind::Success);
-        Ok(())
     }
 
     pub fn render(&self, frame: &mut Frame<'_>) {
@@ -433,7 +532,7 @@ impl App {
     }
 
     fn render_footer(&self) -> Paragraph<'_> {
-        Paragraph::new(self.message.clone())
+        Paragraph::new(self.footer_text())
             .style(
                 Style::default()
                     .fg(match self.message_kind {
@@ -451,6 +550,13 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::SURFACE_ALT)),
             )
+    }
+
+    fn footer_text(&self) -> String {
+        match &self.loading {
+            Some(loading) => format!("{loading}..."),
+            None => self.message.clone(),
+        }
     }
 
     fn render_picker(&self) -> Paragraph<'_> {
@@ -497,6 +603,57 @@ enum Intent {
     ClosePicker,
     MovePicker(isize),
     ConfirmPicker,
+}
+
+fn execute_operation(client: GitClient, request: OperationRequest) -> OperationOutcome {
+    let result = match request {
+        OperationRequest::Checkout { branch } => client
+            .checkout(&branch)
+            .map(|_| format!("Checked out {branch}")),
+        OperationRequest::Switch { branch } => client
+            .switch(&branch)
+            .map(|_| format!("Switched to {branch}")),
+        OperationRequest::Pull { remote, branch } => client
+            .pull(remote.as_deref(), branch.as_deref())
+            .map(|_| String::from("Pull complete.")),
+        OperationRequest::Push { remote, branch } => client
+            .push(remote.as_deref(), branch.as_deref())
+            .map(|_| String::from("Push complete.")),
+    };
+
+    match result {
+        Ok(message) => match client.status() {
+            Ok(status) => match client.branches() {
+                Ok(branches) => match client.log(12) {
+                    Ok(log) => {
+                        let selected_branch = branches
+                            .iter()
+                            .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
+                            .or_else(|| {
+                                branches
+                                    .iter()
+                                    .position(|branch| matches!(branch.kind, crate::domain::BranchKind::Local) && branch.name == status.branch_name)
+                            })
+                            .unwrap_or(0);
+
+                        OperationOutcome::Success {
+                            snapshot: RepoSnapshot {
+                                status: Some(status),
+                                branches,
+                                log,
+                                selected_branch,
+                            },
+                            message,
+                        }
+                    }
+                    Err(error) => OperationOutcome::Error(error.to_string()),
+                },
+                Err(error) => OperationOutcome::Error(error.to_string()),
+            },
+            Err(error) => OperationOutcome::Error(error.to_string()),
+        },
+        Err(error) => OperationOutcome::Error(error.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -636,5 +793,14 @@ mod tests {
         });
 
         assert_eq!(app.current_sync_target(), None);
+    }
+
+    #[test]
+    fn loading_text_overrides_footer_message() {
+        let mut app = App::new(GitClient::new());
+        app.loading = Some("Pulling changes".to_string());
+        app.message = "Pull complete.".to_string();
+
+        assert_eq!(app.footer_text(), "Pulling changes...");
     }
 }

@@ -30,6 +30,7 @@ pub fn run(client: GitClient) -> anyhow::Result<()> {
     }
 
     let result = loop {
+        app.poll_operation()?;
         terminal.draw(|frame| app.render(frame))?;
 
         if event::poll(Duration::from_millis(150))? {
