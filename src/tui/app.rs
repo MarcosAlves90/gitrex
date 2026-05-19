@@ -146,7 +146,7 @@ impl App {
             KeyCode::Char('3') => Intent::SelectView(View::Log),
             KeyCode::Char('j') | KeyCode::Down => Intent::MoveSelection(1),
             KeyCode::Char('k') | KeyCode::Up => Intent::MoveSelection(-1),
-            KeyCode::Char('a') => Intent::OpenPicker,
+            KeyCode::Enter => Intent::OpenPicker,
             _ => Intent::None,
         }
     }
@@ -512,7 +512,7 @@ mod tests {
     fn key_map_opens_picker_for_branch_actions() {
         let app = App::new(GitClient::new());
         assert_eq!(
-            app.intent_for_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            app.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Intent::OpenPicker
         );
         assert_eq!(
