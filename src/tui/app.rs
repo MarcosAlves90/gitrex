@@ -31,6 +31,7 @@ pub enum PickerAction {
     Switch,
     Pull,
     Push,
+    CreateBranch,
 }
 
 impl PickerAction {
@@ -40,6 +41,7 @@ impl PickerAction {
             PickerAction::Switch => "switch branch",
             PickerAction::Pull => "pull current branch",
             PickerAction::Push => "push current branch",
+            PickerAction::CreateBranch => "create branch from source",
         }
     }
 }
@@ -52,6 +54,9 @@ pub struct App {
     pub(crate) selected_branch: usize,
     pub(crate) picker_open: bool,
     pub(crate) picker_index: usize,
+    pub(crate) branch_create_open: bool,
+    pub(crate) branch_create_source: Option<String>,
+    pub(crate) branch_create_name: String,
     pub(crate) loading: Option<String>,
     pub(crate) message: String,
     pub(crate) message_kind: MessageKind,
@@ -67,6 +72,9 @@ impl App {
             selected_branch: 0,
             picker_open: false,
             picker_index: 0,
+            branch_create_open: false,
+            branch_create_source: None,
+            branch_create_name: String::new(),
             loading: None,
             message: String::from("Press q to quit, r to refresh, Enter for branch actions."),
             message_kind: MessageKind::Info,
@@ -99,8 +107,13 @@ impl App {
             PickerAction::Switch,
             PickerAction::Pull,
             PickerAction::Push,
+            PickerAction::CreateBranch,
         ];
         ACTIONS
+    }
+
+    pub fn branch_create_is_open(&self) -> bool {
+        self.branch_create_open
     }
 
     pub fn sync_target_display(&self) -> Option<String> {
@@ -137,6 +150,48 @@ impl App {
 
     pub fn close_picker(&mut self) {
         self.picker_open = false;
+    }
+
+    pub fn open_branch_creator(&mut self) {
+        let Some(source) = self.selected_branch().map(|branch| branch.name.clone()) else {
+            self.set_feedback("No branch selected.", MessageKind::Warning);
+            return;
+        };
+
+        self.branch_create_open = true;
+        self.branch_create_source = Some(source);
+        self.branch_create_name.clear();
+        self.set_feedback(
+            "Type a new branch name and press Enter.",
+            MessageKind::Info,
+        );
+    }
+
+    pub fn close_branch_creator(&mut self) {
+        self.branch_create_open = false;
+        self.branch_create_source = None;
+        self.branch_create_name.clear();
+    }
+
+    pub fn push_branch_create_char(&mut self, ch: char) {
+        if self.branch_create_open && (ch.is_ascii_graphic() || ch == ' ') {
+            self.branch_create_name.push(ch);
+        }
+    }
+
+    pub fn pop_branch_create_char(&mut self) {
+        if self.branch_create_open {
+            self.branch_create_name.pop();
+        }
+    }
+
+    pub fn branch_create_request(&self) -> Option<(String, String)> {
+        let source = self.branch_create_source.clone()?;
+        let branch = self.branch_create_name.trim().to_string();
+        if branch.is_empty() {
+            return None;
+        }
+        Some((branch, source))
     }
 
     pub fn move_picker(&mut self, delta: isize) {
@@ -202,6 +257,12 @@ impl App {
         frame.render_widget(self.render_log(), right);
         frame.render_widget(self.render_actions(), actions);
         frame.render_widget(self.render_footer(), footer);
+        if self.branch_create_open {
+            let popup = self.render_branch_creator();
+            let area = layout::centered_rect(60, 34, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(popup, area);
+        }
         if self.picker_open {
             let popup = self.render_picker();
             let area = layout::centered_rect(60, 50, frame.area());
@@ -376,6 +437,30 @@ impl App {
             )
     }
 
+    fn render_branch_creator(&self) -> Paragraph<'_> {
+        let source = self
+            .branch_create_source
+            .as_deref()
+            .unwrap_or("unknown");
+        let name = if self.branch_create_name.is_empty() {
+            "<type new branch name>"
+        } else {
+            &self.branch_create_name
+        };
+
+        Paragraph::new(format!(
+            "Source branch: {source}\nNew branch name: {name}\n\nEnter = create • Esc = cancel • Backspace = delete"
+        ))
+        .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+        .block(
+            Block::default()
+                .title("Create Branch")
+                .title_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ACCENT)),
+        )
+    }
+
     fn branch_state(&self) -> ListState {
         let mut state = ListState::default();
         if !self.local_branches().is_empty() {
@@ -479,5 +564,37 @@ mod tests {
         app.message = "Pull complete.".to_string();
 
         assert_eq!(app.footer_text(), "Pulling changes...");
+    }
+
+    #[test]
+    fn open_branch_creator_uses_selected_source_branch() {
+        let mut app = App::new();
+        app.branches = vec![BranchInfo {
+            name: "main".to_string(),
+            current: true,
+            upstream: None,
+            commit: "abc".to_string(),
+            subject: "init".to_string(),
+            kind: BranchKind::Local,
+        }];
+
+        app.open_branch_creator();
+
+        assert!(app.branch_create_is_open());
+        assert_eq!(app.branch_create_source.as_deref(), Some("main"));
+        assert!(app.branch_create_name.is_empty());
+    }
+
+    #[test]
+    fn branch_create_request_uses_trimmed_input_and_source() {
+        let mut app = App::new();
+        app.branch_create_open = true;
+        app.branch_create_source = Some("main".to_string());
+        app.branch_create_name = "  feature/login  ".to_string();
+
+        assert_eq!(
+            app.branch_create_request(),
+            Some(("feature/login".to_string(), "main".to_string()))
+        );
     }
 }

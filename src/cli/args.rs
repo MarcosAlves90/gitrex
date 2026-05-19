@@ -23,6 +23,11 @@ pub enum Commands {
     Switch {
         target: String,
     },
+    CreateBranch {
+        name: String,
+        #[arg(short, long)]
+        from: Option<String>,
+    },
     Clone {
         repository: String,
         directory: Option<PathBuf>,

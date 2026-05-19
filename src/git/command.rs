@@ -50,6 +50,14 @@ impl GitClient {
         self.run(&["switch".to_string(), target.to_string()]).map(|_| ())
     }
 
+    pub fn create_branch(&self, branch: &str, start_point: Option<&str>) -> Result<()> {
+        let mut args = vec!["switch".to_string(), "-c".to_string(), branch.to_string()];
+        if let Some(start_point) = start_point {
+            args.push(start_point.to_string());
+        }
+        self.run(&args).map(|_| ())
+    }
+
     pub fn clone(&self, repository: &str, directory: Option<&Path>) -> Result<()> {
         let mut args = vec!["clone".to_string(), repository.to_string()];
         if let Some(directory) = directory {

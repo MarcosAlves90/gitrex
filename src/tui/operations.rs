@@ -10,6 +10,10 @@ use crate::{
 pub enum OperationRequest {
     Checkout { branch: String },
     Switch { branch: String },
+    CreateBranch {
+        branch: String,
+        start_point: String,
+    },
     Pull {
         remote: Option<String>,
         branch: Option<String>,
@@ -25,6 +29,9 @@ impl OperationRequest {
         match self {
             OperationRequest::Checkout { branch } => format!("Checking out {branch}"),
             OperationRequest::Switch { branch } => format!("Switching to {branch}"),
+            OperationRequest::CreateBranch { branch, start_point } => {
+                format!("Creating {branch} from {start_point}")
+            }
             OperationRequest::Pull { remote, branch } | OperationRequest::Push { remote, branch } => {
                 match (remote.as_deref(), branch.as_deref()) {
                     (Some(remote), Some(branch)) => format!("{remote}/{branch}"),
@@ -38,6 +45,9 @@ impl OperationRequest {
         match self {
             OperationRequest::Checkout { branch } => format!("Checked out {branch}"),
             OperationRequest::Switch { branch } => format!("Switched to {branch}"),
+            OperationRequest::CreateBranch { branch, start_point } => {
+                format!("Created {branch} from {start_point}")
+            }
             OperationRequest::Pull { remote, branch } => {
                 match (remote.as_deref(), branch.as_deref()) {
                     (Some(remote), Some(branch)) => format!("Pulled {remote}/{branch}"),
@@ -125,6 +135,9 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
         OperationRequest::Switch { branch } => client
             .switch(&branch)
             .map(|_| format!("Switched to {branch}")),
+        OperationRequest::CreateBranch { branch, start_point } => client
+            .create_branch(&branch, Some(&start_point))
+            .map(|_| format!("Created {branch} from {start_point}")),
         OperationRequest::Pull { remote, branch } => client
             .pull(remote.as_deref(), branch.as_deref())
             .map(|_| String::from("Pull complete.")),
@@ -153,5 +166,6 @@ mod tests {
     fn request_labels_are_clear() {
         assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.loading_label(), "origin/main");
         assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.success_label(), "Pulled origin/main");
+        assert_eq!(OperationRequest::CreateBranch { branch: "feature/login".into(), start_point: "main".into() }.loading_label(), "Creating feature/login from main");
     }
 }

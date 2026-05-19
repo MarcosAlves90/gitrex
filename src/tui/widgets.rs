@@ -16,6 +16,7 @@ pub fn actions_copy(selected_branch: Option<&str>, sync_target: Option<&str>) ->
         "j/k or arrows = move",
         "1/2/3 = change pane",
         "Enter = open branch actions",
+        "In branch actions: create branch from source",
         "r = refresh",
         "q = quit",
         "",
@@ -45,5 +46,6 @@ mod tests {
         assert!(copy.contains("feature/login"));
         assert!(copy.contains("Enter = open branch actions"));
         assert!(copy.contains("origin/feature/login"));
+        assert!(copy.contains("create branch from source"));
     }
 }

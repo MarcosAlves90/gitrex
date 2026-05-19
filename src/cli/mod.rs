@@ -18,6 +18,13 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
             client.switch(&target)?;
             output::print_message(&format!("switched to {target}"));
         }
+        Some(Commands::CreateBranch { name, from }) => {
+            client.create_branch(&name, from.as_deref())?;
+            match from {
+                Some(source) => output::print_message(&format!("created {name} from {source}")),
+                None => output::print_message(&format!("created {name}")),
+            }
+        }
         Some(Commands::Clone {
             repository,
             directory,
