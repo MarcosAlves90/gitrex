@@ -110,10 +110,6 @@ impl App {
         self.local_branches().get(self.selected_branch).copied()
     }
 
-    pub fn picker_is_open(&self) -> bool {
-        self.picker_open
-    }
-
     fn local_branches(&self) -> Vec<&BranchInfo> {
         self.branches
             .iter()
@@ -253,6 +249,13 @@ impl App {
         }
     }
 
+    fn current_sync_target(&self) -> Option<(String, String)> {
+        let status = self.status.as_ref()?;
+        let upstream = status.upstream.as_deref()?;
+        let (remote, _) = upstream.split_once('/')?;
+        Some((remote.to_string(), status.branch_name.clone()))
+    }
+
     fn checkout_selected(&mut self) -> anyhow::Result<()> {
         let branch = match self.selected_branch() {
             Some(branch) => branch.name.clone(),
@@ -284,16 +287,22 @@ impl App {
     }
 
     fn pull_current(&mut self) -> anyhow::Result<()> {
-        let branch = self.status.as_ref().map(|status| status.branch_name.clone());
-        self.client.pull(None, branch.as_deref())?;
+        if let Some((remote, branch)) = self.current_sync_target() {
+            self.client.pull(Some(remote.as_str()), Some(branch.as_str()))?;
+        } else {
+            self.client.pull(None, None)?;
+        }
         self.refresh()?;
         self.set_feedback("Pull complete.", MessageKind::Success);
         Ok(())
     }
 
     fn push_current(&mut self) -> anyhow::Result<()> {
-        let branch = self.status.as_ref().map(|status| status.branch_name.clone());
-        self.client.push(None, branch.as_deref())?;
+        if let Some((remote, branch)) = self.current_sync_target() {
+            self.client.push(Some(remote.as_str()), Some(branch.as_str()))?;
+        } else {
+            self.client.push(None, None)?;
+        }
         self.refresh()?;
         self.set_feedback("Push complete.", MessageKind::Success);
         Ok(())
@@ -494,7 +503,7 @@ enum Intent {
 mod tests {
     use super::{App, Intent, MessageKind, PickerAction, View};
     use crate::{
-        domain::{BranchInfo, BranchKind},
+        domain::{BranchInfo, BranchKind, RepoStatus},
         git::GitClient,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -572,9 +581,9 @@ mod tests {
         }];
 
         app.open_picker();
-        assert!(app.picker_is_open());
+        assert!(app.picker_open);
         app.close_picker();
-        assert!(!app.picker_is_open());
+        assert!(!app.picker_open);
     }
 
     #[test]
@@ -590,11 +599,42 @@ mod tests {
         }];
 
         app.open_picker();
-        assert!(app.picker_is_open());
+        assert!(app.picker_open);
         assert!(!app.handle_event(crossterm::event::Event::Key(KeyEvent::new(
             KeyCode::Esc,
             KeyModifiers::NONE,
         ))).unwrap());
-        assert!(!app.picker_is_open());
+        assert!(!app.picker_open);
+    }
+
+    #[test]
+    fn current_sync_target_uses_upstream_remote_and_local_branch() {
+        let mut app = App::new(GitClient::new());
+        app.status = Some(RepoStatus {
+            branch_name: "main".to_string(),
+            upstream: Some("origin/main".to_string()),
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+        });
+
+        assert_eq!(
+            app.current_sync_target(),
+            Some(("origin".to_string(), "main".to_string()))
+        );
+    }
+
+    #[test]
+    fn current_sync_target_returns_none_without_upstream() {
+        let mut app = App::new(GitClient::new());
+        app.status = Some(RepoStatus {
+            branch_name: "main".to_string(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+        });
+
+        assert_eq!(app.current_sync_target(), None);
     }
 }
