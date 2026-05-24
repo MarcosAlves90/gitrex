@@ -50,6 +50,10 @@ impl GitClient {
         crate::git::log::read_graph_log_all(self)
     }
 
+    pub fn graph_log_for_ref(&self, reference: &str) -> Result<Vec<crate::domain::GraphLine>> {
+        crate::git::log::read_graph_log_for_ref(self, reference)
+    }
+
     pub fn checkout(&self, target: &str) -> Result<()> {
         self.run(&["checkout".to_string(), target.to_string()]).map(|_| ())
     }

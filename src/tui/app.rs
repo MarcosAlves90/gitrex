@@ -341,6 +341,17 @@ impl App {
         self.selected_commit = self.selected_commit.min(self.log.len().saturating_sub(1));
     }
 
+    pub fn apply_graph_history(
+        &mut self,
+        log: Vec<CommitSummary>,
+        graph: Vec<GraphLine>,
+    ) {
+        self.log = log;
+        self.graph = graph;
+        self.selected_commit = 0;
+        self.graph_scroll_offset = 0;
+    }
+
     pub fn footer_text(&self) -> String {
         match &self.loading {
             Some(loading) => format!("{loading}..."),
@@ -472,7 +483,11 @@ impl App {
             .into_iter()
             .map(ListItem::new)
             .collect::<Vec<_>>();
-        let title = output::render_graph_title(self.status.as_ref().map(|status| status.branch_name.as_str()));
+        let title = output::render_graph_title(
+            self.selected_branch()
+                .map(|branch| branch.name.as_str())
+                .or_else(|| self.status.as_ref().map(|status| status.branch_name.as_str())),
+        );
 
         List::new(items)
             .block(

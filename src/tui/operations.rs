@@ -108,14 +108,6 @@ impl GitOperationRunner {
 pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
     let status = client.status().map_err(|error| error.to_string())?;
     let branches = client.branches().map_err(|error| error.to_string())?;
-    let graph = client.graph_log_all().map_err(|error| error.to_string())?;
-    let log = graph
-        .iter()
-        .filter_map(|line| match line {
-            crate::domain::GraphLine::Commit { summary, .. } => Some(summary.clone()),
-            crate::domain::GraphLine::Connector { .. } => None,
-        })
-        .collect::<Vec<_>>();
     let selected_branch = branches
         .iter()
         .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
@@ -125,6 +117,11 @@ pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
                 .position(|branch| matches!(branch.kind, crate::domain::BranchKind::Local) && branch.name == status.branch_name)
         })
         .unwrap_or(0);
+    let graph_ref = branches
+        .get(selected_branch)
+        .map(|branch| branch.name.as_str())
+        .unwrap_or(status.branch_name.as_str());
+    let (log, graph) = load_graph_history(client, graph_ref)?;
 
     Ok(RepoSnapshot {
         status: Some(status),
@@ -133,6 +130,24 @@ pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
         graph,
         selected_branch,
     })
+}
+
+pub fn load_graph_history(
+    client: &GitClient,
+    reference: &str,
+) -> Result<(Vec<CommitSummary>, Vec<crate::domain::GraphLine>), String> {
+    let graph = client
+        .graph_log_for_ref(reference)
+        .map_err(|error| error.to_string())?;
+    let log = graph
+        .iter()
+        .filter_map(|line| match line {
+            crate::domain::GraphLine::Commit { summary, .. } => Some(summary.clone()),
+            crate::domain::GraphLine::Connector { .. } => None,
+        })
+        .collect::<Vec<_>>();
+
+    Ok((log, graph))
 }
 
 fn execute_operation(client: GitClient, request: OperationRequest) -> OperationOutcome {
@@ -204,6 +219,24 @@ mod tests {
         assert!(snapshot.log.len() > 12);
     }
 
+    #[test]
+    fn build_snapshot_stays_on_current_branch_history() {
+        let _guard = current_dir_lock().lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        init_divergent_repo(temp.path());
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(temp.path()).unwrap();
+
+        let client = GitClient::new();
+        let snapshot = build_snapshot(&client).unwrap();
+
+        env::set_current_dir(original_dir).unwrap();
+
+        assert!(snapshot.log.iter().any(|entry| entry.subject == "main work"));
+        assert!(!snapshot.log.iter().any(|entry| entry.subject == "feature work"));
+    }
+
     fn current_dir_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -218,6 +251,25 @@ mod tests {
             run_git(path, &["add", "README.md"]);
             run_git(path, &["commit", "-m", &format!("commit {index}")]);
         }
+    }
+
+    fn init_divergent_repo(path: &Path) {
+        run_git(path, &["init", "-b", "main"]);
+        configure_repo(path);
+
+        write_file(path, "README.md", "base\n");
+        run_git(path, &["add", "README.md"]);
+        run_git(path, &["commit", "-m", "base commit"]);
+
+        run_git(path, &["checkout", "-b", "feature/login"]);
+        write_file(path, "README.md", "feature work\n");
+        run_git(path, &["add", "README.md"]);
+        run_git(path, &["commit", "-m", "feature work"]);
+
+        run_git(path, &["checkout", "main"]);
+        write_file(path, "README.md", "main work\n");
+        run_git(path, &["add", "README.md"]);
+        run_git(path, &["commit", "-m", "main work"]);
     }
 
     fn configure_repo(path: &Path) {

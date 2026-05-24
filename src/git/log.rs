@@ -21,6 +21,20 @@ pub fn read_graph_log_all(client: &GitClient) -> crate::domain::Result<Vec<Graph
     Ok(parse_graph_log_lines(&output))
 }
 
+pub fn read_graph_log_for_ref(
+    client: &GitClient,
+    reference: &str,
+) -> crate::domain::Result<Vec<GraphLine>> {
+    let output = client.run_git(&[
+        "log".to_string(),
+        reference.to_string(),
+        "--graph".to_string(),
+        "--date=short".to_string(),
+        "--pretty=format:%x09%H%x09%an%x09%ad%x09%s".to_string(),
+    ])?;
+    Ok(parse_graph_log_lines(&output))
+}
+
 fn read_log_with_limit(
     client: &GitClient,
     limit: Option<usize>,

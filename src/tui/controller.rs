@@ -6,7 +6,7 @@ use crate::{
 
 use super::{
     app::{App, CommitAction, MessageKind, PickerAction, View},
-    operations::{build_snapshot, GitOperationRunner, OperationOutcome, OperationRequest},
+    operations::{build_snapshot, load_graph_history, GitOperationRunner, OperationOutcome, OperationRequest},
 };
 
 pub struct TuiController {
@@ -207,6 +207,7 @@ impl TuiController {
             }
             Intent::MoveSelection(delta) => {
                 self.app.move_selection(delta);
+                self.refresh_selected_branch_graph()?;
                 Ok(false)
             }
             Intent::MoveCommitSelection(delta) => {
@@ -356,6 +357,16 @@ impl TuiController {
         Ok(())
     }
 
+    fn refresh_selected_branch_graph(&mut self) -> anyhow::Result<()> {
+        let Some(branch) = self.app.selected_branch().map(|branch| branch.name.clone()) else {
+            return Ok(());
+        };
+
+        let (log, graph) = load_graph_history(&self.client, &branch).map_err(anyhow::Error::msg)?;
+        self.app.apply_graph_history(log, graph);
+        Ok(())
+    }
+
     fn finish_operation(&mut self, outcome: OperationOutcome) -> anyhow::Result<()> {
         self.app.stop_loading();
         match outcome {
@@ -382,6 +393,13 @@ impl TuiController {
 mod tests {
     use super::{Intent, TuiController, View};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::{
+        env,
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::{Mutex, OnceLock},
+    };
 
     use crate::{domain::{BranchInfo, BranchKind, CommitSummary, RepoStatus}, git::GitClient};
 
@@ -463,5 +481,111 @@ mod tests {
 
         assert!(controller.app().branch_create_is_open());
         assert_eq!(controller.app().branch_create_source.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn moving_branch_selection_refreshes_graph_for_selected_branch() {
+        let _guard = current_dir_lock().lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        init_divergent_repo(temp.path());
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(temp.path()).unwrap();
+
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: None,
+                commit: "main".to_string(),
+                subject: "main".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "feature/login".to_string(),
+                current: false,
+                upstream: None,
+                commit: "feature".to_string(),
+                subject: "feature".to_string(),
+                kind: BranchKind::Local,
+            },
+        ];
+        controller.app_mut().status = Some(RepoStatus {
+            branch_name: "main".to_string(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+        });
+
+        controller.refresh_selected_branch_graph().unwrap();
+        assert!(controller
+            .app()
+            .log
+            .iter()
+            .any(|entry| entry.subject == "main work"));
+        assert!(!controller
+            .app()
+            .log
+            .iter()
+            .any(|entry| entry.subject == "feature work"));
+
+        controller.app_mut().move_selection(1);
+        controller.refresh_selected_branch_graph().unwrap();
+        assert!(controller
+            .app()
+            .log
+            .iter()
+            .any(|entry| entry.subject == "feature work"));
+        assert!(!controller
+            .app()
+            .log
+            .iter()
+            .any(|entry| entry.subject == "main work"));
+
+        env::set_current_dir(original_dir).unwrap();
+    }
+
+    fn current_dir_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn init_divergent_repo(path: &Path) {
+        run_git(path, &["init", "-b", "main"]);
+        configure_repo(path);
+
+        write_file(path, "README.md", "base\n");
+        run_git(path, &["add", "README.md"]);
+        run_git(path, &["commit", "-m", "base commit"]);
+
+        run_git(path, &["checkout", "-b", "feature/login"]);
+        write_file(path, "README.md", "feature work\n");
+        run_git(path, &["add", "README.md"]);
+        run_git(path, &["commit", "-m", "feature work"]);
+
+        run_git(path, &["checkout", "main"]);
+        write_file(path, "README.md", "main work\n");
+        run_git(path, &["add", "README.md"]);
+        run_git(path, &["commit", "-m", "main work"]);
+    }
+
+    fn configure_repo(path: &Path) {
+        run_git(path, &["config", "user.name", "Gitrex Test"]);
+        run_git(path, &["config", "user.email", "gitrex@example.com"]);
+    }
+
+    fn run_git(path: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed in {}", args, path.display());
+    }
+
+    fn write_file(path: &Path, name: &str, contents: &str) {
+        fs::write(PathBuf::from(path).join(name), contents).unwrap();
     }
 }
