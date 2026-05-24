@@ -113,7 +113,8 @@ fn scroll_text(text: &str, offset: usize, width: usize) -> String {
         return String::new();
     }
 
-    let chars = text.chars().collect::<Vec<_>>();
+    let marquee = format!("{text}   |   {text}   |   ");
+    let chars = marquee.chars().collect::<Vec<_>>();
     let start = offset % chars.len().max(1);
     chars
         .iter()
@@ -206,7 +207,7 @@ pub fn render_status_entries(entries: &[StatusEntry]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_graph_rows, render_graph_title};
+    use super::{render_graph_rows, render_graph_title, scroll_text};
     use crate::domain::{CommitSummary, GraphLine};
 
     #[test]
@@ -350,5 +351,14 @@ mod tests {
 
         assert_eq!(short_text.find("2026-05-24"), long_text.find("2026-05-24"));
         assert_eq!(short_text.find("abc123de"), long_text.find("abc123de"));
+    }
+
+    #[test]
+    fn graph_scroll_keeps_separator_between_loops() {
+        let text = "first word last word";
+        let scrolled = scroll_text(text, 0, 32);
+
+        assert!(scrolled.contains("   |   "));
+        assert!(scrolled.starts_with(text));
     }
 }
