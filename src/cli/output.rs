@@ -77,14 +77,12 @@ pub fn render_log_preview(entries: &[CommitSummary]) -> Vec<String> {
         .collect()
 }
 
-pub fn render_graph_preview(entries: &[CommitSummary], selected: usize) -> Vec<String> {
+pub fn render_graph_preview(entries: &[CommitSummary], _selected: usize) -> Vec<String> {
     entries
         .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let marker = if index == selected { "▶" } else { " " };
+        .map(|entry| {
             let short_hash = entry.hash.chars().take(8).collect::<String>();
-            format!("{marker} {short_hash} {} {}", entry.date, entry.subject)
+            format!("  {short_hash} {} {}", entry.date, entry.subject)
         })
         .collect()
 }
@@ -141,7 +139,7 @@ mod tests {
 
         let lines = render_graph_preview(&entries, 1);
         assert_eq!(lines.len(), 3);
-        assert!(lines[1].starts_with("▶"));
+        assert!(lines[1].starts_with("  "));
         assert!(lines[2].contains("Fix bug"));
     }
 }
