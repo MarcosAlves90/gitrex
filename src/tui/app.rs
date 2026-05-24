@@ -5,7 +5,7 @@ use ratatui::{
 
 use crate::{
     cli::output,
-    domain::{BranchInfo, CommitSummary, RepoStatus},
+    domain::{BranchInfo, CommitSummary, GraphLine, RepoStatus},
 };
 
 use super::{layout, theme, widgets};
@@ -66,6 +66,7 @@ pub struct App {
     pub(crate) status: Option<RepoStatus>,
     pub(crate) branches: Vec<BranchInfo>,
     pub(crate) log: Vec<CommitSummary>,
+    pub(crate) graph: Vec<GraphLine>,
     pub(crate) selected_branch: usize,
     pub(crate) selected_commit: usize,
     pub(crate) picker_open: bool,
@@ -88,6 +89,7 @@ impl App {
             status: None,
             branches: Vec::new(),
             log: Vec::new(),
+            graph: Vec::new(),
             selected_branch: 0,
             selected_commit: 0,
             picker_open: false,
@@ -328,11 +330,13 @@ impl App {
         status: RepoStatus,
         branches: Vec<BranchInfo>,
         log: Vec<CommitSummary>,
+        graph: Vec<GraphLine>,
         selected_branch: usize,
     ) {
         self.status = Some(status);
         self.branches = branches;
         self.log = log;
+        self.graph = graph;
         self.selected_branch = selected_branch;
         self.selected_commit = self.selected_commit.min(self.log.len().saturating_sub(1));
     }
@@ -459,8 +463,8 @@ impl App {
     }
 
     fn render_graph(&self, width: u16) -> List<'_> {
-        let items = output::render_graph_preview(
-            &self.log,
+        let items = output::render_graph_rows(
+            &self.graph,
             self.selected_commit,
             self.graph_scroll_offset,
             width,
@@ -489,10 +493,23 @@ impl App {
 
     fn graph_state(&self) -> ListState {
         let mut state = ListState::default();
-        if !self.log.is_empty() {
-            state.select(Some(self.selected_commit.min(self.log.len().saturating_sub(1))));
+        if !self.graph.is_empty() {
+            state.select(self.selected_commit_row_index());
         }
         state
+    }
+
+    fn selected_commit_row_index(&self) -> Option<usize> {
+        let mut commit_index = 0usize;
+        for (row_index, row) in self.graph.iter().enumerate() {
+            if matches!(row, GraphLine::Commit { .. }) {
+                if commit_index == self.selected_commit {
+                    return Some(row_index);
+                }
+                commit_index = commit_index.saturating_add(1);
+            }
+        }
+        None
     }
 
     fn render_actions(&self) -> Paragraph<'_> {

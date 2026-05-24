@@ -16,7 +16,7 @@ pub fn dashboard(area: Rect) -> [Rect; 4] {
 pub fn body(area: Rect) -> [Rect; 2] {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(24), Constraint::Length(48)])
+        .constraints([Constraint::Min(16), Constraint::Length(72)])
         .split(area);
     [cols[0], cols[1]]
 }

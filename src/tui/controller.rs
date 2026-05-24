@@ -41,6 +41,7 @@ impl TuiController {
             snapshot.status.unwrap(),
             snapshot.branches,
             snapshot.log,
+            snapshot.graph,
             snapshot.selected_branch,
         );
         self.app.set_feedback("Repository refreshed.", MessageKind::Success);
@@ -364,6 +365,7 @@ impl TuiController {
                         snapshot.status.unwrap(),
                         snapshot.branches,
                         snapshot.log,
+                        snapshot.graph,
                         snapshot.selected_branch,
                     );
                 self.app.set_feedback(message, MessageKind::Success);

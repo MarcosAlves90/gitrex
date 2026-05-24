@@ -69,6 +69,7 @@ pub struct RepoSnapshot {
     pub status: Option<RepoStatus>,
     pub branches: Vec<BranchInfo>,
     pub log: Vec<CommitSummary>,
+    pub graph: Vec<crate::domain::GraphLine>,
     pub selected_branch: usize,
 }
 
@@ -107,7 +108,14 @@ impl GitOperationRunner {
 pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
     let status = client.status().map_err(|error| error.to_string())?;
     let branches = client.branches().map_err(|error| error.to_string())?;
-    let log = client.log_all().map_err(|error| error.to_string())?;
+    let graph = client.graph_log_all().map_err(|error| error.to_string())?;
+    let log = graph
+        .iter()
+        .filter_map(|line| match line {
+            crate::domain::GraphLine::Commit { summary, .. } => Some(summary.clone()),
+            crate::domain::GraphLine::Connector { .. } => None,
+        })
+        .collect::<Vec<_>>();
     let selected_branch = branches
         .iter()
         .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
@@ -122,6 +130,7 @@ pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
         status: Some(status),
         branches,
         log,
+        graph,
         selected_branch,
     })
 }

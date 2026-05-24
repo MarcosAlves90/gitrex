@@ -5,3 +5,14 @@ pub struct CommitSummary {
     pub date: String,
     pub subject: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphLine {
+    Commit {
+        graph: String,
+        summary: CommitSummary,
+    },
+    Connector {
+        graph: String,
+    },
+}
