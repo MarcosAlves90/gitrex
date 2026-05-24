@@ -89,7 +89,7 @@ pub fn render_graph_preview(
         .enumerate()
         .map(|(index, entry)| {
             let short_hash = entry.hash.chars().take(8).collect::<String>();
-            let line = format!("{short_hash} {} {}", entry.date, entry.subject);
+            let line = format!("{} {} {short_hash}", entry.subject, entry.date);
             let body = if content_width == 0 {
                 String::new()
             } else if index == selected && line.chars().count() > content_width {
