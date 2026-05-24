@@ -79,6 +79,12 @@ impl TuiController {
         self.apply_intent(intent)
     }
 
+    pub fn tick(&mut self) {
+        if matches!(self.app.view, View::Log) {
+            self.app.advance_graph_scroll();
+        }
+    }
+
     pub fn start_operation(&mut self, action: PickerAction) -> anyhow::Result<()> {
         if self.operation_rx.is_some() {
             return Ok(());

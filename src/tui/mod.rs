@@ -35,6 +35,7 @@ pub fn run(client: GitClient) -> anyhow::Result<()> {
 
     let result = loop {
         controller.poll_operation()?;
+        controller.tick();
         terminal.draw(|frame| controller.app().render(frame))?;
 
         if event::poll(Duration::from_millis(150))? {

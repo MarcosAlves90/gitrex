@@ -72,6 +72,7 @@ pub struct App {
     pub(crate) picker_index: usize,
     pub(crate) commit_actions_open: bool,
     pub(crate) commit_action_index: usize,
+    pub(crate) graph_scroll_offset: usize,
     pub(crate) branch_create_open: bool,
     pub(crate) branch_create_source: Option<String>,
     pub(crate) branch_create_name: String,
@@ -93,6 +94,7 @@ impl App {
             picker_index: 0,
             commit_actions_open: false,
             commit_action_index: 0,
+            graph_scroll_offset: 0,
             branch_create_open: false,
             branch_create_source: None,
             branch_create_name: String::new(),
@@ -175,7 +177,18 @@ impl App {
             self.selected_commit.saturating_add(delta as usize)
         };
 
+        if next != self.selected_commit {
+            self.graph_scroll_offset = 0;
+        }
         self.selected_commit = next.min(commit_count.saturating_sub(1));
+    }
+
+    pub fn advance_graph_scroll(&mut self) {
+        if self.log.is_empty() {
+            self.graph_scroll_offset = 0;
+            return;
+        }
+        self.graph_scroll_offset = self.graph_scroll_offset.wrapping_add(1);
     }
 
     pub fn open_picker(&mut self) {
@@ -341,7 +354,7 @@ impl App {
         let mut branch_state = self.branch_state();
         frame.render_stateful_widget(self.render_branches(), branches_area, &mut branch_state);
         let mut graph_state = self.graph_state();
-        frame.render_stateful_widget(self.render_graph(), right, &mut graph_state);
+        frame.render_stateful_widget(self.render_graph(right.width), right, &mut graph_state);
         frame.render_widget(self.render_actions(), actions);
         frame.render_widget(self.render_footer(), footer);
         if self.branch_create_open {
@@ -445,8 +458,13 @@ impl App {
             )
     }
 
-    fn render_graph(&self) -> List<'_> {
-        let items = output::render_graph_preview(&self.log, self.selected_commit)
+    fn render_graph(&self, width: u16) -> List<'_> {
+        let items = output::render_graph_preview(
+            &self.log,
+            self.selected_commit,
+            self.graph_scroll_offset,
+            width,
+        )
             .into_iter()
             .map(ListItem::new)
             .collect::<Vec<_>>();
@@ -777,6 +795,30 @@ mod tests {
 
         app.move_commit_selection(-1);
         assert_eq!(app.selected_commit().unwrap().hash, "abc123");
+    }
+
+    #[test]
+    fn commit_selection_reset_scroll_offset() {
+        let mut app = App::new();
+        app.log = vec![
+            crate::domain::CommitSummary {
+                hash: "abc123".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Initial commit".to_string(),
+            },
+            crate::domain::CommitSummary {
+                hash: "def456".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Add feature".to_string(),
+            },
+        ];
+        app.graph_scroll_offset = 42;
+
+        app.move_commit_selection(1);
+
+        assert_eq!(app.graph_scroll_offset, 0);
     }
 
     #[test]

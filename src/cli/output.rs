@@ -77,13 +77,43 @@ pub fn render_log_preview(entries: &[CommitSummary]) -> Vec<String> {
         .collect()
 }
 
-pub fn render_graph_preview(entries: &[CommitSummary], _selected: usize) -> Vec<String> {
+pub fn render_graph_preview(
+    entries: &[CommitSummary],
+    selected: usize,
+    offset: usize,
+    width: u16,
+) -> Vec<String> {
+    let content_width = width.saturating_sub(2) as usize;
     entries
         .iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(index, entry)| {
             let short_hash = entry.hash.chars().take(8).collect::<String>();
-            format!("  {short_hash} {} {}", entry.date, entry.subject)
+            let line = format!("{short_hash} {} {}", entry.date, entry.subject);
+            let body = if content_width == 0 {
+                String::new()
+            } else if index == selected && line.chars().count() > content_width {
+                scroll_text(&line, offset, content_width)
+            } else {
+                line.chars().take(content_width).collect()
+            };
+            format!("  {body}")
         })
+        .collect()
+}
+
+fn scroll_text(text: &str, offset: usize, width: usize) -> String {
+    if text.is_empty() || width == 0 {
+        return String::new();
+    }
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let start = offset % chars.len().max(1);
+    chars
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(width)
         .collect()
 }
 
@@ -137,9 +167,48 @@ mod tests {
             },
         ];
 
-        let lines = render_graph_preview(&entries, 1);
+        let lines = render_graph_preview(&entries, 1, 0, 80);
         assert_eq!(lines.len(), 3);
         assert!(lines[1].starts_with("  "));
         assert!(lines[2].contains("Fix bug"));
+    }
+
+    #[test]
+    fn graph_preview_scrolls_long_lines() {
+        let entries = vec![CommitSummary {
+            hash: "abc123def456".to_string(),
+            author: "Marcos".to_string(),
+            date: "2026-05-24".to_string(),
+            subject: "A very long commit subject that exceeds width".to_string(),
+        }];
+
+        let first = render_graph_preview(&entries, 0, 0, 20);
+        let second = render_graph_preview(&entries, 0, 5, 20);
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_ne!(first[0], second[0]);
+    }
+
+    #[test]
+    fn graph_preview_only_scrolls_selected_line() {
+        let entries = vec![
+            CommitSummary {
+                hash: "abc123def456".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "A very long commit subject that exceeds width".to_string(),
+            },
+            CommitSummary {
+                hash: "def456abc123".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Another long commit subject that exceeds width".to_string(),
+            },
+        ];
+
+        let first = render_graph_preview(&entries, 0, 0, 24);
+        let second = render_graph_preview(&entries, 0, 5, 24);
+        assert_ne!(first[0], second[0]);
+        assert_eq!(first[1], second[1]);
     }
 }
