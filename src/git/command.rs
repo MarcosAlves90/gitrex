@@ -42,6 +42,10 @@ impl GitClient {
         crate::git::log::read_log(self, limit)
     }
 
+    pub fn log_all(&self) -> Result<Vec<crate::domain::CommitSummary>> {
+        crate::git::log::read_log_all(self)
+    }
+
     pub fn checkout(&self, target: &str) -> Result<()> {
         self.run(&["checkout".to_string(), target.to_string()]).map(|_| ())
     }

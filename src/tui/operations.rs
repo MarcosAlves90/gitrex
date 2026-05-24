@@ -107,7 +107,7 @@ impl GitOperationRunner {
 pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
     let status = client.status().map_err(|error| error.to_string())?;
     let branches = client.branches().map_err(|error| error.to_string())?;
-    let log = client.log(12).map_err(|error| error.to_string())?;
+    let log = client.log_all().map_err(|error| error.to_string())?;
     let selected_branch = branches
         .iter()
         .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
@@ -160,12 +160,72 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
 
 #[cfg(test)]
 mod tests {
-    use super::OperationRequest;
+    use std::{
+        env,
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::{Mutex, OnceLock},
+    };
+
+    use super::{build_snapshot, OperationRequest};
+    use crate::git::GitClient;
 
     #[test]
     fn request_labels_are_clear() {
         assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.loading_label(), "origin/main");
         assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.success_label(), "Pulled origin/main");
         assert_eq!(OperationRequest::CreateBranch { branch: "feature/login".into(), start_point: "main".into() }.loading_label(), "Creating feature/login from main");
+    }
+
+    #[test]
+    fn build_snapshot_includes_all_log_entries() {
+        let _guard = current_dir_lock().lock().unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        init_repo(temp.path());
+
+        let original_dir = env::current_dir().unwrap();
+        env::set_current_dir(temp.path()).unwrap();
+
+        let client = GitClient::new();
+        let snapshot = build_snapshot(&client).unwrap();
+
+        env::set_current_dir(original_dir).unwrap();
+
+        assert!(snapshot.log.len() > 12);
+    }
+
+    fn current_dir_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn init_repo(path: &Path) {
+        run_git(path, &["init"]);
+        configure_repo(path);
+
+        for index in 0..15 {
+            write_file(path, "README.md", &format!("commit {index}\n"));
+            run_git(path, &["add", "README.md"]);
+            run_git(path, &["commit", "-m", &format!("commit {index}")]);
+        }
+    }
+
+    fn configure_repo(path: &Path) {
+        run_git(path, &["config", "user.name", "Gitrex Test"]);
+        run_git(path, &["config", "user.email", "gitrex@example.com"]);
+    }
+
+    fn run_git(path: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} failed in {}", args, path.display());
+    }
+
+    fn write_file(path: &Path, name: &str, contents: &str) {
+        fs::write(PathBuf::from(path).join(name), contents).unwrap();
     }
 }
