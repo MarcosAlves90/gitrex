@@ -28,6 +28,7 @@
 - Defaults to a TUI in interactive terminals
 - Falls back to CLI behavior for scripts and pipes
 - Covers core repository operations: status, branch inspection, log review, checkout, switch, branch creation, clone, pull, and push
+- TUI includes a branch panel plus a wide `Git Graph` panel with tree lines, commit navigation, and commit actions
 
 ## Features
 
@@ -36,6 +37,7 @@
 | Repository status | Branch, upstream, divergence, and working tree changes |
 | Branch management | List branches, checkout, switch, and create branches from another ref |
 | Commit history | Compact log output with configurable limits |
+| Git graph | Full commit tree, commit selection, rotating selected subject text, and commit actions |
 | Remote operations | Clone, pull, and push from the same CLI |
 | TUI mode | A terminal UI for working inside the repo without leaving the keyboard |
 
@@ -52,6 +54,14 @@ cargo build --release
 ```bash
 cargo run -- tui
 ```
+
+### TUI navigation
+
+- `1/2/3` switch between status, branches, and graph
+- `j/k` or arrow keys move within the active panel
+- In `Branches`, `Enter` opens branch actions
+- In `Git Graph`, `Enter` opens commit actions for the hovered commit
+- The selected commit subject scrolls when it does not fit, while date and hash stay aligned
 
 ### Run a command directly
 
