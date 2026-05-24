@@ -5,7 +5,7 @@ use ratatui::{
 
 use crate::{
     cli::output,
-    domain::{BranchInfo, CommitSummary, GraphLine, RepoStatus},
+    domain::{BranchHistory, BranchInfo, CommitSummary, GraphLine, RepoStatus},
 };
 
 use super::{layout, theme, widgets};
@@ -329,25 +329,20 @@ impl App {
         &mut self,
         status: RepoStatus,
         branches: Vec<BranchInfo>,
-        log: Vec<CommitSummary>,
-        graph: Vec<GraphLine>,
+        history: BranchHistory,
         selected_branch: usize,
     ) {
         self.status = Some(status);
         self.branches = branches;
-        self.log = log;
-        self.graph = graph;
+        self.log = history.commits;
+        self.graph = history.graph;
         self.selected_branch = selected_branch;
         self.selected_commit = self.selected_commit.min(self.log.len().saturating_sub(1));
     }
 
-    pub fn apply_graph_history(
-        &mut self,
-        log: Vec<CommitSummary>,
-        graph: Vec<GraphLine>,
-    ) {
-        self.log = log;
-        self.graph = graph;
+    pub fn apply_graph_history(&mut self, history: BranchHistory) {
+        self.log = history.commits;
+        self.graph = history.graph;
         self.selected_commit = 0;
         self.graph_scroll_offset = 0;
     }

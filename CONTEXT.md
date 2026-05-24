@@ -23,3 +23,4 @@
 ## Notes
 
 - Keep AI-generated work isolated in `/artifacts` until it is explicitly reviewed for inclusion.
+- Branch history means the commit list and graph for one branch ref, not the whole repo history.

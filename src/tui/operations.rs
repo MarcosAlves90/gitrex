@@ -2,7 +2,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use crate::{
-    domain::{BranchInfo, CommitSummary, RepoStatus},
+    domain::{BranchHistory, BranchInfo, RepoStatus},
     git::GitClient,
 };
 
@@ -68,8 +68,7 @@ impl OperationRequest {
 pub struct RepoSnapshot {
     pub status: Option<RepoStatus>,
     pub branches: Vec<BranchInfo>,
-    pub log: Vec<CommitSummary>,
-    pub graph: Vec<crate::domain::GraphLine>,
+    pub history: BranchHistory,
     pub selected_branch: usize,
 }
 
@@ -121,33 +120,16 @@ pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
         .get(selected_branch)
         .map(|branch| branch.name.as_str())
         .unwrap_or(status.branch_name.as_str());
-    let (log, graph) = load_graph_history(client, graph_ref)?;
+    let history = client
+        .history_for_ref(graph_ref)
+        .map_err(|error| error.to_string())?;
 
     Ok(RepoSnapshot {
         status: Some(status),
         branches,
-        log,
-        graph,
+        history,
         selected_branch,
     })
-}
-
-pub fn load_graph_history(
-    client: &GitClient,
-    reference: &str,
-) -> Result<(Vec<CommitSummary>, Vec<crate::domain::GraphLine>), String> {
-    let graph = client
-        .graph_log_for_ref(reference)
-        .map_err(|error| error.to_string())?;
-    let log = graph
-        .iter()
-        .filter_map(|line| match line {
-            crate::domain::GraphLine::Commit { summary, .. } => Some(summary.clone()),
-            crate::domain::GraphLine::Connector { .. } => None,
-        })
-        .collect::<Vec<_>>();
-
-    Ok((log, graph))
 }
 
 fn execute_operation(client: GitClient, request: OperationRequest) -> OperationOutcome {
@@ -189,7 +171,6 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        sync::{Mutex, OnceLock},
     };
 
     use super::{build_snapshot, OperationRequest};
@@ -204,42 +185,63 @@ mod tests {
 
     #[test]
     fn build_snapshot_includes_all_log_entries() {
-        let _guard = current_dir_lock().lock().unwrap();
+        let _guard = crate::test_support::current_dir_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
         init_repo(temp.path());
 
         let original_dir = env::current_dir().unwrap();
+        let _restore = CurrentDirGuard::new(original_dir.clone());
         env::set_current_dir(temp.path()).unwrap();
 
         let client = GitClient::new();
         let snapshot = build_snapshot(&client).unwrap();
 
-        env::set_current_dir(original_dir).unwrap();
-
-        assert!(snapshot.log.len() > 12);
+        assert!(snapshot.history.commits.len() > 12);
     }
 
     #[test]
     fn build_snapshot_stays_on_current_branch_history() {
-        let _guard = current_dir_lock().lock().unwrap();
+        let _guard = crate::test_support::current_dir_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
         init_divergent_repo(temp.path());
 
         let original_dir = env::current_dir().unwrap();
+        let _restore = CurrentDirGuard::new(original_dir.clone());
         env::set_current_dir(temp.path()).unwrap();
 
         let client = GitClient::new();
         let snapshot = build_snapshot(&client).unwrap();
 
-        env::set_current_dir(original_dir).unwrap();
-
-        assert!(snapshot.log.iter().any(|entry| entry.subject == "main work"));
-        assert!(!snapshot.log.iter().any(|entry| entry.subject == "feature work"));
+        assert!(snapshot
+            .history
+            .commits
+            .iter()
+            .any(|entry| entry.subject == "main work"));
+        assert!(!snapshot
+            .history
+            .commits
+            .iter()
+            .any(|entry| entry.subject == "feature work"));
     }
 
-    fn current_dir_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn new(original: PathBuf) -> Self {
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = env::set_current_dir(&self.original);
+        }
     }
 
     fn init_repo(path: &Path) {

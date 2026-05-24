@@ -6,7 +6,7 @@ use crate::{
 
 use super::{
     app::{App, CommitAction, MessageKind, PickerAction, View},
-    operations::{build_snapshot, load_graph_history, GitOperationRunner, OperationOutcome, OperationRequest},
+    operations::{build_snapshot, GitOperationRunner, OperationOutcome, OperationRequest},
 };
 
 pub struct TuiController {
@@ -40,8 +40,7 @@ impl TuiController {
         self.app.apply_snapshot(
             snapshot.status.unwrap(),
             snapshot.branches,
-            snapshot.log,
-            snapshot.graph,
+            snapshot.history,
             snapshot.selected_branch,
         );
         self.app.set_feedback("Repository refreshed.", MessageKind::Success);
@@ -207,7 +206,7 @@ impl TuiController {
             }
             Intent::MoveSelection(delta) => {
                 self.app.move_selection(delta);
-                self.refresh_selected_branch_graph()?;
+                self.refresh_selected_branch_history()?;
                 Ok(false)
             }
             Intent::MoveCommitSelection(delta) => {
@@ -357,13 +356,13 @@ impl TuiController {
         Ok(())
     }
 
-    fn refresh_selected_branch_graph(&mut self) -> anyhow::Result<()> {
+    fn refresh_selected_branch_history(&mut self) -> anyhow::Result<()> {
         let Some(branch) = self.app.selected_branch().map(|branch| branch.name.clone()) else {
             return Ok(());
         };
 
-        let (log, graph) = load_graph_history(&self.client, &branch).map_err(anyhow::Error::msg)?;
-        self.app.apply_graph_history(log, graph);
+        let history = self.client.history_for_ref(&branch).map_err(anyhow::Error::msg)?;
+        self.app.apply_graph_history(history);
         Ok(())
     }
 
@@ -375,8 +374,7 @@ impl TuiController {
                     .apply_snapshot(
                         snapshot.status.unwrap(),
                         snapshot.branches,
-                        snapshot.log,
-                        snapshot.graph,
+                        snapshot.history,
                         snapshot.selected_branch,
                     );
                 self.app.set_feedback(message, MessageKind::Success);
@@ -398,7 +396,6 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        sync::{Mutex, OnceLock},
     };
 
     use crate::{domain::{BranchInfo, BranchKind, CommitSummary, RepoStatus}, git::GitClient};
@@ -485,11 +482,14 @@ mod tests {
 
     #[test]
     fn moving_branch_selection_refreshes_graph_for_selected_branch() {
-        let _guard = current_dir_lock().lock().unwrap();
+        let _guard = crate::test_support::current_dir_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
         init_divergent_repo(temp.path());
 
         let original_dir = env::current_dir().unwrap();
+        let _restore = CurrentDirGuard::new(original_dir.clone());
         env::set_current_dir(temp.path()).unwrap();
 
         let mut controller = TuiController::new(GitClient::new());
@@ -519,7 +519,7 @@ mod tests {
             files: Vec::new(),
         });
 
-        controller.refresh_selected_branch_graph().unwrap();
+        controller.refresh_selected_branch_history().unwrap();
         assert!(controller
             .app()
             .log
@@ -532,7 +532,7 @@ mod tests {
             .any(|entry| entry.subject == "feature work"));
 
         controller.app_mut().move_selection(1);
-        controller.refresh_selected_branch_graph().unwrap();
+        controller.refresh_selected_branch_history().unwrap();
         assert!(controller
             .app()
             .log
@@ -543,13 +543,22 @@ mod tests {
             .log
             .iter()
             .any(|entry| entry.subject == "main work"));
-
-        env::set_current_dir(original_dir).unwrap();
     }
 
-    fn current_dir_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn new(original: PathBuf) -> Self {
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = env::set_current_dir(&self.original);
+        }
     }
 
     fn init_divergent_repo(path: &Path) {

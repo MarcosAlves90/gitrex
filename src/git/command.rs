@@ -42,16 +42,8 @@ impl GitClient {
         crate::git::log::read_log(self, limit)
     }
 
-    pub fn log_all(&self) -> Result<Vec<crate::domain::CommitSummary>> {
-        crate::git::log::read_log_all(self)
-    }
-
-    pub fn graph_log_all(&self) -> Result<Vec<crate::domain::GraphLine>> {
-        crate::git::log::read_graph_log_all(self)
-    }
-
-    pub fn graph_log_for_ref(&self, reference: &str) -> Result<Vec<crate::domain::GraphLine>> {
-        crate::git::log::read_graph_log_for_ref(self, reference)
+    pub fn history_for_ref(&self, reference: &str) -> Result<crate::domain::BranchHistory> {
+        crate::git::read_branch_history(self, reference)
     }
 
     pub fn checkout(&self, target: &str) -> Result<()> {
