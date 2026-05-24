@@ -90,9 +90,29 @@ pub fn render_graph_preview(entries: &[CommitSummary], selected: usize) -> Vec<S
         .collect()
 }
 
+pub fn render_graph_title(branch_name: Option<&str>) -> String {
+    match branch_name {
+        Some(branch_name) if !branch_name.trim().is_empty() => {
+            format!("Git Graph • {branch_name}")
+        }
+        _ => String::from("Git Graph"),
+    }
+}
+
 pub fn render_status_entries(entries: &[StatusEntry]) -> Vec<String> {
     entries
         .iter()
         .map(|entry| format!("{} {}", entry.code, entry.path))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_graph_title;
+
+    #[test]
+    fn graph_title_shows_current_branch() {
+        assert_eq!(render_graph_title(Some("main")), "Git Graph • main");
+        assert_eq!(render_graph_title(None), "Git Graph");
+    }
 }

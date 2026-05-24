@@ -449,10 +449,11 @@ impl App {
             .into_iter()
             .map(ListItem::new)
             .collect::<Vec<_>>();
+        let title = output::render_graph_title(self.status.as_ref().map(|status| status.branch_name.as_str()));
 
         List::new(items).block(
             Block::default()
-                .title("Git Graph")
+                .title(title)
                 .title_style(Style::default().fg(theme::MUTED))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::SURFACE_ALT)),
