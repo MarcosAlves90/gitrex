@@ -4,7 +4,7 @@ pub fn mode_label(view: View) -> &'static str {
     match view {
         View::Status => "status",
         View::Branches => "branches",
-        View::Log => "log",
+        View::Log => "graph",
     }
 }
 
@@ -37,7 +37,7 @@ mod tests {
     fn mode_label_matches_view_names() {
         assert_eq!(mode_label(View::Status), "status");
         assert_eq!(mode_label(View::Branches), "branches");
-        assert_eq!(mode_label(View::Log), "log");
+        assert_eq!(mode_label(View::Log), "graph");
     }
 
     #[test]

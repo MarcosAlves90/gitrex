@@ -5,7 +5,7 @@ use crate::{
 };
 
 use super::{
-    app::{App, MessageKind, PickerAction, View},
+    app::{App, CommitAction, MessageKind, PickerAction, View},
     operations::{build_snapshot, GitOperationRunner, OperationOutcome, OperationRequest},
 };
 
@@ -115,10 +115,15 @@ enum Intent {
     Refresh,
     SelectView(View),
     MoveSelection(isize),
+    MoveCommitSelection(isize),
     OpenPicker,
     ClosePicker,
+    OpenCommitActions,
+    CloseCommitActions,
     MovePicker(isize),
+    MoveCommitAction(isize),
     ConfirmPicker,
+    ConfirmCommitAction,
     CancelBranchCreate,
     DeleteBranchName,
     TypeBranchName(char),
@@ -147,6 +152,16 @@ impl TuiController {
             };
         }
 
+        if self.app.commit_actions_are_open() {
+            return match key.code {
+                KeyCode::Esc => Intent::CloseCommitActions,
+                KeyCode::Enter => Intent::ConfirmCommitAction,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MoveCommitAction(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MoveCommitAction(-1),
+                _ => Intent::None,
+            };
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Intent::Quit,
             KeyCode::Char('r') => Intent::Refresh,
@@ -159,7 +174,14 @@ impl TuiController {
             KeyCode::Char('k') | KeyCode::Up if matches!(self.app.view, View::Branches) => {
                 Intent::MoveSelection(-1)
             }
+            KeyCode::Char('j') | KeyCode::Down if matches!(self.app.view, View::Log) => {
+                Intent::MoveCommitSelection(1)
+            }
+            KeyCode::Char('k') | KeyCode::Up if matches!(self.app.view, View::Log) => {
+                Intent::MoveCommitSelection(-1)
+            }
             KeyCode::Enter if matches!(self.app.view, View::Branches) => Intent::OpenPicker,
+            KeyCode::Enter if matches!(self.app.view, View::Log) => Intent::OpenCommitActions,
             _ => Intent::None,
         }
     }
@@ -180,6 +202,10 @@ impl TuiController {
                 self.app.move_selection(delta);
                 Ok(false)
             }
+            Intent::MoveCommitSelection(delta) => {
+                self.app.move_commit_selection(delta);
+                Ok(false)
+            }
             Intent::OpenPicker => {
                 self.app.open_picker();
                 Ok(false)
@@ -188,12 +214,28 @@ impl TuiController {
                 self.app.close_picker();
                 Ok(false)
             }
+            Intent::OpenCommitActions => {
+                self.app.open_commit_actions();
+                Ok(false)
+            }
+            Intent::CloseCommitActions => {
+                self.app.close_commit_actions();
+                Ok(false)
+            }
             Intent::MovePicker(delta) => {
                 self.app.move_picker(delta);
                 Ok(false)
             }
+            Intent::MoveCommitAction(delta) => {
+                self.app.move_commit_action(delta);
+                Ok(false)
+            }
             Intent::ConfirmPicker => {
                 self.confirm_picker()?;
+                Ok(false)
+            }
+            Intent::ConfirmCommitAction => {
+                self.confirm_commit_action()?;
                 Ok(false)
             }
             Intent::CancelBranchCreate => {
@@ -228,6 +270,35 @@ impl TuiController {
                 Ok(())
             }
             _ => self.start_operation(action),
+        }
+    }
+
+    fn confirm_commit_action(&mut self) -> anyhow::Result<()> {
+        let action = *self
+            .app
+            .commit_actions()
+            .get(self.app.commit_action_index)
+            .unwrap_or(&CommitAction::CheckoutCommit);
+        self.app.close_commit_actions();
+
+        match action {
+            CommitAction::CheckoutCommit => {
+                let target = self
+                    .app
+                    .selected_commit()
+                    .map(|commit| commit.hash.clone())
+                    .ok_or_else(|| anyhow::anyhow!("No commit selected."))?;
+                self.start_operation_from_target(target)
+            }
+            CommitAction::CreateBranchFromCommit => {
+                let source = self
+                    .app
+                    .selected_commit()
+                    .map(|commit| commit.hash.clone())
+                    .ok_or_else(|| anyhow::anyhow!("No commit selected."))?;
+                self.app.open_branch_creator_from_source(source);
+                Ok(())
+            }
         }
     }
 
@@ -269,6 +340,15 @@ impl TuiController {
         }
     }
 
+    fn start_operation_from_target(&mut self, target: String) -> anyhow::Result<()> {
+        let operation = OperationRequest::Checkout { branch: target };
+        let label = operation.loading_label();
+        self.app.start_loading(label.clone());
+        self.operation_rx = Some(self.runner.spawn(operation));
+        self.app.set_feedback(format!("{label}..."), MessageKind::Info);
+        Ok(())
+    }
+
     fn finish_operation(&mut self, outcome: OperationOutcome) -> anyhow::Result<()> {
         self.app.stop_loading();
         match outcome {
@@ -295,13 +375,10 @@ mod tests {
     use super::{Intent, TuiController, View};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::{
-        domain::{BranchInfo, BranchKind, RepoStatus},
-        git::GitClient,
-    };
+    use crate::{domain::{BranchInfo, BranchKind, CommitSummary, RepoStatus}, git::GitClient};
 
     #[test]
-    fn controller_routes_enter_to_picker_opening_only_on_branches_view() {
+    fn controller_routes_enter_to_picker_opening_and_log_actions() {
         let mut controller = TuiController::new(GitClient::new());
         controller.app_mut().select_view(View::Branches);
 
@@ -314,7 +391,7 @@ mod tests {
 
         assert!(matches!(
             controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Intent::None
+            Intent::OpenCommitActions
         ));
     }
 
@@ -325,23 +402,32 @@ mod tests {
     }
 
     #[test]
-    fn movement_is_ignored_outside_branches_view() {
+    fn log_view_uses_commit_navigation_and_actions() {
         let mut controller = TuiController::new(GitClient::new());
-        controller.app_mut().branches = vec![BranchInfo {
-            name: "main".to_string(),
-            current: true,
-            upstream: None,
-            commit: "abc".to_string(),
-            subject: "init".to_string(),
-            kind: BranchKind::Local,
-        }];
-        controller.app_mut().select_view(View::Status);
+        controller.app_mut().log = vec![
+            CommitSummary {
+                hash: "abc123".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Initial commit".to_string(),
+            },
+            CommitSummary {
+                hash: "def456".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Add feature".to_string(),
+            },
+        ];
+        controller.app_mut().select_view(View::Log);
 
         assert!(matches!(
             controller.intent_for_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
-            Intent::None
+            Intent::MoveCommitSelection(1)
         ));
-        assert_eq!(controller.app().selected_branch().unwrap().name, "main");
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Intent::OpenCommitActions
+        ));
     }
 
     #[test]

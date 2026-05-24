@@ -34,6 +34,21 @@ pub enum PickerAction {
     CreateBranch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitAction {
+    CheckoutCommit,
+    CreateBranchFromCommit,
+}
+
+impl CommitAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            CommitAction::CheckoutCommit => "checkout commit",
+            CommitAction::CreateBranchFromCommit => "create branch from commit",
+        }
+    }
+}
+
 impl PickerAction {
     pub fn label(self) -> &'static str {
         match self {
@@ -52,8 +67,11 @@ pub struct App {
     pub(crate) branches: Vec<BranchInfo>,
     pub(crate) log: Vec<CommitSummary>,
     pub(crate) selected_branch: usize,
+    pub(crate) selected_commit: usize,
     pub(crate) picker_open: bool,
     pub(crate) picker_index: usize,
+    pub(crate) commit_actions_open: bool,
+    pub(crate) commit_action_index: usize,
     pub(crate) branch_create_open: bool,
     pub(crate) branch_create_source: Option<String>,
     pub(crate) branch_create_name: String,
@@ -70,8 +88,11 @@ impl App {
             branches: Vec::new(),
             log: Vec::new(),
             selected_branch: 0,
+            selected_commit: 0,
             picker_open: false,
             picker_index: 0,
+            commit_actions_open: false,
+            commit_action_index: 0,
             branch_create_open: false,
             branch_create_source: None,
             branch_create_name: String::new(),
@@ -116,6 +137,10 @@ impl App {
         self.branch_create_open
     }
 
+    pub fn commit_actions_are_open(&self) -> bool {
+        self.commit_actions_open
+    }
+
     pub fn sync_target_display(&self) -> Option<String> {
         self.current_sync_target()
             .map(|(remote, branch)| format!("{remote}/{branch}"))
@@ -137,6 +162,22 @@ impl App {
         self.selected_branch = next.min(branch_count.saturating_sub(1));
     }
 
+    pub fn move_commit_selection(&mut self, delta: isize) {
+        let commit_count = self.log.len();
+        if commit_count == 0 {
+            self.selected_commit = 0;
+            return;
+        }
+
+        let next = if delta.is_negative() {
+            self.selected_commit.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.selected_commit.saturating_add(delta as usize)
+        };
+
+        self.selected_commit = next.min(commit_count.saturating_sub(1));
+    }
+
     pub fn open_picker(&mut self) {
         if self.selected_branch().is_none() {
             self.set_feedback("No branch selected.", MessageKind::Warning);
@@ -152,12 +193,30 @@ impl App {
         self.picker_open = false;
     }
 
+    pub fn open_commit_actions(&mut self) {
+        if self.selected_commit().is_none() {
+            self.set_feedback("No commit selected.", MessageKind::Warning);
+            return;
+        }
+        self.commit_actions_open = true;
+        self.commit_action_index = 0;
+        self.set_feedback("Choose an action for the selected commit.", MessageKind::Info);
+    }
+
+    pub fn close_commit_actions(&mut self) {
+        self.commit_actions_open = false;
+    }
+
     pub fn open_branch_creator(&mut self) {
         let Some(source) = self.selected_branch().map(|branch| branch.name.clone()) else {
             self.set_feedback("No branch selected.", MessageKind::Warning);
             return;
         };
 
+        self.open_branch_creator_from_source(source);
+    }
+
+    pub fn open_branch_creator_from_source(&mut self, source: String) {
         self.branch_create_open = true;
         self.branch_create_source = Some(source);
         self.branch_create_name.clear();
@@ -194,6 +253,10 @@ impl App {
         Some((branch, source))
     }
 
+    pub fn selected_commit(&self) -> Option<&CommitSummary> {
+        self.log.get(self.selected_commit)
+    }
+
     pub fn move_picker(&mut self, delta: isize) {
         let count = self.picker_actions().len();
         if count == 0 {
@@ -206,6 +269,28 @@ impl App {
             self.picker_index.saturating_add(delta as usize)
         };
         self.picker_index = next.min(count.saturating_sub(1));
+    }
+
+    pub fn move_commit_action(&mut self, delta: isize) {
+        let count = self.commit_actions().len();
+        if count == 0 {
+            return;
+        }
+
+        let next = if delta.is_negative() {
+            self.commit_action_index.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.commit_action_index.saturating_add(delta as usize)
+        };
+        self.commit_action_index = next.min(count.saturating_sub(1));
+    }
+
+    pub fn commit_actions(&self) -> &'static [CommitAction] {
+        const ACTIONS: &[CommitAction] = &[
+            CommitAction::CheckoutCommit,
+            CommitAction::CreateBranchFromCommit,
+        ];
+        ACTIONS
     }
 
     pub fn start_loading(&mut self, label: impl Into<String>) {
@@ -236,6 +321,7 @@ impl App {
         self.branches = branches;
         self.log = log;
         self.selected_branch = selected_branch;
+        self.selected_commit = self.selected_commit.min(self.log.len().saturating_sub(1));
     }
 
     pub fn footer_text(&self) -> String {
@@ -254,7 +340,7 @@ impl App {
         frame.render_widget(self.render_status(), status_area);
         let mut branch_state = self.branch_state();
         frame.render_stateful_widget(self.render_branches(), branches_area, &mut branch_state);
-        frame.render_widget(self.render_log(), right);
+        frame.render_widget(self.render_graph(), right);
         frame.render_widget(self.render_actions(), actions);
         frame.render_widget(self.render_footer(), footer);
         if self.branch_create_open {
@@ -265,6 +351,12 @@ impl App {
         }
         if self.picker_open {
             let popup = self.render_picker();
+            let area = layout::centered_rect(60, 50, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(popup, area);
+        }
+        if self.commit_actions_open {
+            let popup = self.render_commit_actions();
             let area = layout::centered_rect(60, 50, frame.area());
             frame.render_widget(Clear, area);
             frame.render_widget(popup, area);
@@ -352,15 +444,15 @@ impl App {
             )
     }
 
-    fn render_log(&self) -> List<'_> {
-        let items = output::render_log_preview(&self.log)
+    fn render_graph(&self) -> List<'_> {
+        let items = output::render_graph_preview(&self.log, self.selected_commit)
             .into_iter()
             .map(ListItem::new)
             .collect::<Vec<_>>();
 
         List::new(items).block(
             Block::default()
-                .title("Recent Log")
+                .title("Git Graph")
                 .title_style(Style::default().fg(theme::MUTED))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::SURFACE_ALT)),
@@ -368,12 +460,32 @@ impl App {
     }
 
     fn render_actions(&self) -> Paragraph<'_> {
-        Paragraph::new(
+        let copy = if matches!(self.view, View::Log) {
+            let commit = self.selected_commit().map(|commit| {
+                let short_hash = commit.hash.chars().take(8).collect::<String>();
+                format!("{short_hash} {}", commit.subject)
+            });
+            let commit = commit.as_deref().unwrap_or("no commit selected");
+            [
+                "Keys:",
+                "j/k or arrows = move commits",
+                "1/2/3 = change pane",
+                "Enter = open commit options",
+                "r = refresh",
+                "q = quit",
+                "",
+                "Selected commit:",
+                commit,
+            ]
+            .join("\n")
+        } else {
             widgets::actions_copy(
                 self.selected_branch().map(|b| b.name.as_str()),
                 self.sync_target_display().as_deref(),
-            ),
-        )
+            )
+        };
+
+        Paragraph::new(copy)
             .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT))
             .block(
                 Block::default()
@@ -457,6 +569,42 @@ impl App {
                 .title("Create Branch")
                 .title_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
                 .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT)),
+        )
+    }
+
+    fn render_commit_actions(&self) -> Paragraph<'_> {
+        let commit = self
+            .selected_commit()
+            .map(|commit| {
+                let short_hash = commit.hash.chars().take(8).collect::<String>();
+                format!("{short_hash} {}", commit.subject)
+            })
+            .unwrap_or_else(|| String::from("unknown commit"));
+        let options = self
+            .commit_actions()
+            .iter()
+            .enumerate()
+            .map(|(index, action)| {
+                let prefix = if index == self.commit_action_index {
+                    "▶"
+                } else {
+                    " "
+                };
+                format!("{prefix} {}", action.label())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Paragraph::new(format!(
+            "Commit: {commit}\n\n{options}\n\nEnter = confirm • Esc = close"
+        ))
+        .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+        .block(
+            Block::default()
+                .title("Commit Actions")
+                .title_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
+                .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::ACCENT)),
         )
     }
@@ -474,7 +622,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, MessageKind, PickerAction, View};
+    use super::{App, CommitAction, MessageKind, PickerAction, View};
     use crate::{
         domain::{BranchInfo, BranchKind, RepoStatus},
     };
@@ -583,6 +731,41 @@ mod tests {
         assert!(app.branch_create_is_open());
         assert_eq!(app.branch_create_source.as_deref(), Some("main"));
         assert!(app.branch_create_name.is_empty());
+    }
+
+    #[test]
+    fn commit_selection_moves_with_log_entries() {
+        let mut app = App::new();
+        app.log = vec![
+            crate::domain::CommitSummary {
+                hash: "abc123".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Initial commit".to_string(),
+            },
+            crate::domain::CommitSummary {
+                hash: "def456".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Add feature".to_string(),
+            },
+        ];
+
+        app.move_commit_selection(1);
+        assert_eq!(app.selected_commit().unwrap().hash, "def456");
+
+        app.move_commit_selection(1);
+        assert_eq!(app.selected_commit().unwrap().hash, "def456");
+
+        app.move_commit_selection(-1);
+        assert_eq!(app.selected_commit().unwrap().hash, "abc123");
+    }
+
+    #[test]
+    fn commit_actions_are_ordered() {
+        let app = App::new();
+        assert_eq!(app.commit_actions()[0], CommitAction::CheckoutCommit);
+        assert_eq!(app.commit_actions()[1], CommitAction::CreateBranchFromCommit);
     }
 
     #[test]

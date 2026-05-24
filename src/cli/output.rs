@@ -77,6 +77,19 @@ pub fn render_log_preview(entries: &[CommitSummary]) -> Vec<String> {
         .collect()
 }
 
+pub fn render_graph_preview(entries: &[CommitSummary], selected: usize) -> Vec<String> {
+    entries
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(index, entry)| {
+            let marker = if index == selected { "▶" } else { " " };
+            let short_hash = entry.hash.chars().take(8).collect::<String>();
+            format!("{marker} {short_hash} {} {}", entry.date, entry.subject)
+        })
+        .collect()
+}
+
 pub fn render_status_entries(entries: &[StatusEntry]) -> Vec<String> {
     entries
         .iter()
