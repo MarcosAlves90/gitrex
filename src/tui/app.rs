@@ -456,14 +456,14 @@ impl App {
             .block(
                 Block::default()
                     .title(title)
-                    .title_style(Style::default().fg(theme::MUTED))
+                    .title_style(Style::default().fg(theme::PURPLE))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::SURFACE_ALT)),
+                    .border_style(Style::default().fg(theme::PURPLE)),
             )
             .highlight_style(
                 Style::default()
                     .fg(theme::BG)
-                    .bg(theme::ACCENT)
+                    .bg(theme::PURPLE)
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("▶ ")
@@ -621,9 +621,9 @@ impl App {
         .block(
             Block::default()
                 .title("Commit Actions")
-                .title_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
+                .title_style(Style::default().fg(theme::PURPLE).add_modifier(Modifier::BOLD))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::ACCENT)),
+                .border_style(Style::default().fg(theme::PURPLE)),
         )
     }
 

@@ -9,3 +9,4 @@ pub const ACCENT: Color = Color::Rgb(88, 166, 255);
 pub const SUCCESS: Color = Color::Rgb(63, 185, 80);
 pub const WARNING: Color = Color::Rgb(210, 153, 34);
 pub const ERROR: Color = Color::Rgb(248, 81, 73);
+pub const PURPLE: Color = Color::Rgb(168, 85, 247);
