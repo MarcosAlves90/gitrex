@@ -340,7 +340,8 @@ impl App {
         frame.render_widget(self.render_status(), status_area);
         let mut branch_state = self.branch_state();
         frame.render_stateful_widget(self.render_branches(), branches_area, &mut branch_state);
-        frame.render_widget(self.render_graph(), right);
+        let mut graph_state = self.graph_state();
+        frame.render_stateful_widget(self.render_graph(), right, &mut graph_state);
         frame.render_widget(self.render_actions(), actions);
         frame.render_widget(self.render_footer(), footer);
         if self.branch_create_open {
@@ -451,13 +452,29 @@ impl App {
             .collect::<Vec<_>>();
         let title = output::render_graph_title(self.status.as_ref().map(|status| status.branch_name.as_str()));
 
-        List::new(items).block(
-            Block::default()
-                .title(title)
-                .title_style(Style::default().fg(theme::MUTED))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::SURFACE_ALT)),
-        )
+        List::new(items)
+            .block(
+                Block::default()
+                    .title(title)
+                    .title_style(Style::default().fg(theme::MUTED))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::SURFACE_ALT)),
+            )
+            .highlight_style(
+                Style::default()
+                    .fg(theme::BG)
+                    .bg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ")
+    }
+
+    fn graph_state(&self) -> ListState {
+        let mut state = ListState::default();
+        if !self.log.is_empty() {
+            state.select(Some(self.selected_commit.min(self.log.len().saturating_sub(1))));
+        }
+        state
     }
 
     fn render_actions(&self) -> Paragraph<'_> {

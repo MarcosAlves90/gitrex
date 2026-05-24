@@ -80,7 +80,6 @@ pub fn render_log_preview(entries: &[CommitSummary]) -> Vec<String> {
 pub fn render_graph_preview(entries: &[CommitSummary], selected: usize) -> Vec<String> {
     entries
         .iter()
-        .take(8)
         .enumerate()
         .map(|(index, entry)| {
             let marker = if index == selected { "▶" } else { " " };
@@ -108,11 +107,41 @@ pub fn render_status_entries(entries: &[StatusEntry]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::render_graph_title;
+    use super::{render_graph_preview, render_graph_title};
+    use crate::domain::CommitSummary;
 
     #[test]
     fn graph_title_shows_current_branch() {
         assert_eq!(render_graph_title(Some("main")), "Git Graph • main");
         assert_eq!(render_graph_title(None), "Git Graph");
+    }
+
+    #[test]
+    fn graph_preview_keeps_all_commits() {
+        let entries = vec![
+            CommitSummary {
+                hash: "abc123".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Initial commit".to_string(),
+            },
+            CommitSummary {
+                hash: "def456".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Add feature".to_string(),
+            },
+            CommitSummary {
+                hash: "ghi789".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Fix bug".to_string(),
+            },
+        ];
+
+        let lines = render_graph_preview(&entries, 1);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].starts_with("▶"));
+        assert!(lines[2].contains("Fix bug"));
     }
 }
