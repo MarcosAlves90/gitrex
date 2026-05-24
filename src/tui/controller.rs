@@ -153,9 +153,13 @@ impl TuiController {
             KeyCode::Char('1') => Intent::SelectView(View::Status),
             KeyCode::Char('2') => Intent::SelectView(View::Branches),
             KeyCode::Char('3') => Intent::SelectView(View::Log),
-            KeyCode::Char('j') | KeyCode::Down => Intent::MoveSelection(1),
-            KeyCode::Char('k') | KeyCode::Up => Intent::MoveSelection(-1),
-            KeyCode::Enter => Intent::OpenPicker,
+            KeyCode::Char('j') | KeyCode::Down if matches!(self.app.view, View::Branches) => {
+                Intent::MoveSelection(1)
+            }
+            KeyCode::Char('k') | KeyCode::Up if matches!(self.app.view, View::Branches) => {
+                Intent::MoveSelection(-1)
+            }
+            KeyCode::Enter if matches!(self.app.view, View::Branches) => Intent::OpenPicker,
             _ => Intent::None,
         }
     }
@@ -288,7 +292,7 @@ impl TuiController {
 
 #[cfg(test)]
 mod tests {
-    use super::{Intent, TuiController};
+    use super::{Intent, TuiController, View};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     use crate::{
@@ -297,11 +301,20 @@ mod tests {
     };
 
     #[test]
-    fn controller_routes_enter_to_picker_opening() {
-        let controller = TuiController::new(GitClient::new());
+    fn controller_routes_enter_to_picker_opening_only_on_branches_view() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().select_view(View::Branches);
+
         assert!(matches!(
             controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Intent::OpenPicker
+        ));
+
+        controller.app_mut().select_view(View::Log);
+
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Intent::None
         ));
     }
 
@@ -309,6 +322,26 @@ mod tests {
     fn controller_handles_non_key_events_as_noop() {
         let mut controller = TuiController::new(GitClient::new());
         assert!(!controller.handle_event(Event::Resize(80, 24)).unwrap());
+    }
+
+    #[test]
+    fn movement_is_ignored_outside_branches_view() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().branches = vec![BranchInfo {
+            name: "main".to_string(),
+            current: true,
+            upstream: None,
+            commit: "abc".to_string(),
+            subject: "init".to_string(),
+            kind: BranchKind::Local,
+        }];
+        controller.app_mut().select_view(View::Status);
+
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Intent::None
+        ));
+        assert_eq!(controller.app().selected_branch().unwrap().name, "main");
     }
 
     #[test]
