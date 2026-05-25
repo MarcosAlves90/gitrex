@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 pub mod test_support;
 
 pub mod app;

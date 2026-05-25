@@ -1,16 +1,18 @@
+use git2::{BranchType, Repository};
+
 use crate::domain::{BranchInfo, BranchKind};
 
 use super::GitClient;
 
 pub fn list_branches(client: &GitClient) -> crate::domain::Result<Vec<BranchInfo>> {
-    let output = client.run_git(&[
-        "for-each-ref".to_string(),
-        "--sort=-committerdate".to_string(),
-        "--format=%(HEAD)\t%(refname:short)\t%(upstream:short)\t%(objectname:short)\t%(subject)\t%(refname)".to_string(),
-        "refs/heads".to_string(),
-        "refs/remotes".to_string(),
-    ])?;
-    Ok(parse_branch_lines(&output))
+    let repo = client.repo()?;
+    let mut branches = Vec::new();
+
+    collect_branches(&repo, BranchType::Local, &mut branches)?;
+    collect_branches(&repo, BranchType::Remote, &mut branches)?;
+    branches.sort_by(|left, right| right.commit.cmp(&left.commit).then_with(|| left.name.cmp(&right.name)));
+
+    Ok(branches)
 }
 
 pub fn parse_branch_lines(output: &str) -> Vec<BranchInfo> {
@@ -41,6 +43,70 @@ pub fn parse_branch_lines(output: &str) -> Vec<BranchInfo> {
             })
         })
         .collect()
+}
+
+fn collect_branches(
+    repo: &Repository,
+    kind: BranchType,
+    branches: &mut Vec<BranchInfo>,
+) -> crate::domain::Result<()> {
+    let head_name = repo
+        .head()
+        .ok()
+        .and_then(|reference| reference.shorthand().map(|name| name.to_string()));
+
+    let iter = repo.branches(Some(kind)).map_err(map_error)?;
+    for item in iter {
+        let (branch, branch_type) = item.map_err(map_error)?;
+        let name = branch
+            .name()
+            .map_err(map_error)?
+            .unwrap_or_default()
+            .to_string();
+        let commit = branch
+            .get()
+            .target()
+            .map(short_oid)
+            .unwrap_or_default();
+        let subject = branch
+            .get()
+            .peel_to_commit()
+            .ok()
+            .and_then(|commit| commit.summary().map(|summary| summary.to_string()))
+            .unwrap_or_default();
+        let upstream = branch
+            .upstream()
+            .ok()
+            .and_then(|upstream| upstream.name().ok().flatten().map(|name| name.to_string()));
+        let current = head_name.as_deref() == Some(name.as_str()) && matches!(branch_type, BranchType::Local);
+
+        branches.push(BranchInfo {
+            name,
+            current,
+            upstream,
+            commit,
+            subject,
+            kind: if matches!(kind, BranchType::Remote) {
+                BranchKind::Remote
+            } else {
+                BranchKind::Local
+            },
+        });
+    }
+
+    Ok(())
+}
+
+fn short_oid(oid: git2::Oid) -> String {
+    oid.to_string().chars().take(8).collect()
+}
+
+fn map_error(error: git2::Error) -> crate::domain::GitError {
+    if error.code() == git2::ErrorCode::NotFound {
+        crate::domain::GitError::NotRepository
+    } else {
+        crate::domain::GitError::Backend(error.message().to_string())
+    }
 }
 
 #[cfg(test)]

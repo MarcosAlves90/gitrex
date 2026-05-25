@@ -1,5 +1,11 @@
-use std::path::Path;
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+};
+
+use git2::{
+    build::CheckoutBuilder, BranchType, ErrorCode, ObjectType, Oid, PushOptions, RemoteCallbacks,
+    Repository,
+};
 
 use crate::domain::error::{GitError, Result};
 
@@ -11,23 +17,8 @@ impl GitClient {
         Self
     }
 
-    fn run(&self, args: &[String]) -> Result<String> {
-        let output = Command::new("git").args(args).output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if stderr.contains("not a git repository") {
-                return Err(GitError::NotRepository);
-            }
-            return Err(GitError::CommandFailed {
-                code: output.status.code(),
-                stderr,
-            });
-        }
-
-        String::from_utf8(output.stdout)
-            .map(|text| text.trim_end().to_string())
-            .map_err(|_| GitError::Utf8)
+    pub(crate) fn repo(&self) -> Result<Repository> {
+        Repository::discover(".").map_err(map_repo_error)
     }
 
     pub fn status(&self) -> Result<crate::domain::RepoStatus> {
@@ -47,52 +38,156 @@ impl GitClient {
     }
 
     pub fn checkout(&self, target: &str) -> Result<()> {
-        self.run(&["checkout".to_string(), target.to_string()]).map(|_| ())
+        let repo = self.repo()?;
+        let mut builder = CheckoutBuilder::new();
+        builder.force();
+
+        if repo.find_branch(target, BranchType::Local).is_ok() {
+            repo.set_head(&format!("refs/heads/{target}"))
+                .map_err(map_git_error)?;
+            repo.checkout_head(Some(&mut builder))
+                .map_err(map_git_error)?;
+            return Ok(());
+        }
+
+        let obj = repo.revparse_single(target).map_err(map_git_error)?;
+        if let Ok(commit) = obj.peel_to_commit() {
+            repo.set_head_detached(commit.id()).map_err(map_git_error)?;
+            repo.checkout_head(Some(&mut builder))
+                .map_err(map_git_error)?;
+            return Ok(());
+        }
+
+        let tree = obj.peel(ObjectType::Tree).map_err(map_git_error)?;
+        repo.checkout_tree(&tree, Some(&mut builder))
+            .map_err(map_git_error)?;
+        repo.set_head_detached(obj.id()).map_err(map_git_error)?;
+        Ok(())
     }
 
     pub fn switch(&self, target: &str) -> Result<()> {
-        self.run(&["switch".to_string(), target.to_string()]).map(|_| ())
+        let repo = self.repo()?;
+        let mut builder = CheckoutBuilder::new();
+        builder.force();
+        repo.set_head(&format!("refs/heads/{target}"))
+            .map_err(map_git_error)?;
+        repo.checkout_head(Some(&mut builder))
+            .map_err(map_git_error)?;
+        Ok(())
     }
 
     pub fn create_branch(&self, branch: &str, start_point: Option<&str>) -> Result<()> {
-        let mut args = vec!["switch".to_string(), "-c".to_string(), branch.to_string()];
-        if let Some(start_point) = start_point {
-            args.push(start_point.to_string());
-        }
-        self.run(&args).map(|_| ())
+        let repo = self.repo()?;
+        let commit_oid = match start_point {
+            Some(reference) => resolve_commit_oid(&repo, reference)?,
+            None => repo
+                .head()
+                .map_err(map_git_error)?
+                .peel_to_commit()
+                .map_err(map_git_error)?
+                .id(),
+        };
+        let commit = repo.find_commit(commit_oid).map_err(map_git_error)?;
+        repo.branch(branch, &commit, false).map_err(map_git_error)?;
+        self.switch(branch)
     }
 
     pub fn clone(&self, repository: &str, directory: Option<&Path>) -> Result<()> {
-        let mut args = vec!["clone".to_string(), repository.to_string()];
-        if let Some(directory) = directory {
-            args.push(directory.display().to_string());
-        }
-        self.run(&args).map(|_| ())
+        let path = match directory {
+            Some(path) => path.to_path_buf(),
+            None => default_clone_path(repository),
+        };
+        Repository::clone(repository, &path).map_err(map_git_error)?;
+        Ok(())
     }
 
     pub fn pull(&self, remote: Option<&str>, branch: Option<&str>) -> Result<()> {
-        let mut args = vec!["pull".to_string()];
-        if let Some(remote) = remote {
-            args.push(remote.to_string());
+        let repo = self.repo()?;
+        let branch_name = branch
+            .map(ToOwned::to_owned)
+            .or_else(|| repo.head().ok().and_then(|head| head.shorthand().map(ToOwned::to_owned)))
+            .ok_or(GitError::NotRepository)?;
+        let remote_name = remote.unwrap_or("origin");
+
+        let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
+        remote
+            .fetch(&[branch_name.as_str()], None, None)
+            .map_err(map_git_error)?;
+
+        let remote_ref_name = format!("refs/remotes/{remote_name}/{branch_name}");
+        let remote_commit = resolve_commit_oid(&repo, &remote_ref_name)?;
+
+        let mut local_ref = repo
+            .find_reference(&format!("refs/heads/{branch_name}"))
+            .map_err(map_git_error)?;
+        let local_commit = local_ref.peel_to_commit().map_err(map_git_error)?;
+
+        if repo
+            .graph_descendant_of(remote_commit, local_commit.id())
+            .map_err(map_git_error)?
+        {
+            local_ref
+                .set_target(remote_commit, "fast-forward")
+                .map_err(map_git_error)?;
+            let mut builder = CheckoutBuilder::new();
+            builder.force();
+            repo.set_head(&format!("refs/heads/{branch_name}"))
+                .map_err(map_git_error)?;
+            repo.checkout_head(Some(&mut builder))
+                .map_err(map_git_error)?;
+            return Ok(());
         }
-        if let Some(branch) = branch {
-            args.push(branch.to_string());
-        }
-        self.run(&args).map(|_| ())
+
+        Err(GitError::Backend(String::from(
+            "pull requires a fast-forward update",
+        )))
     }
 
     pub fn push(&self, remote: Option<&str>, branch: Option<&str>) -> Result<()> {
-        let mut args = vec!["push".to_string()];
-        if let Some(remote) = remote {
-            args.push(remote.to_string());
-        }
-        if let Some(branch) = branch {
-            args.push(branch.to_string());
-        }
-        self.run(&args).map(|_| ())
-    }
+        let repo = self.repo()?;
+        let branch_name = branch
+            .map(ToOwned::to_owned)
+            .or_else(|| repo.head().ok().and_then(|head| head.shorthand().map(ToOwned::to_owned)))
+            .ok_or(GitError::NotRepository)?;
+        let remote_name = remote.unwrap_or("origin");
+        let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
 
-    pub(crate) fn run_git(&self, args: &[String]) -> Result<String> {
-        self.run(args)
+        let mut options = PushOptions::new();
+        let callbacks = RemoteCallbacks::new();
+        options.remote_callbacks(callbacks);
+        remote
+            .push(
+                &[format!("refs/heads/{branch_name}:refs/heads/{branch_name}")],
+                Some(&mut options),
+            )
+            .map_err(map_git_error)?;
+        Ok(())
     }
+}
+
+fn resolve_commit_oid(repo: &Repository, reference: &str) -> Result<Oid> {
+    let object = repo.revparse_single(reference).map_err(map_git_error)?;
+    object.peel_to_commit().map_err(map_git_error).map(|commit| commit.id())
+}
+
+fn default_clone_path(repository: &str) -> PathBuf {
+    let trimmed = repository.trim_end_matches('/');
+    let name = trimmed
+        .rsplit('/')
+        .next()
+        .unwrap_or("repository")
+        .trim_end_matches(".git");
+    PathBuf::from(name)
+}
+
+fn map_repo_error(error: git2::Error) -> GitError {
+    if error.code() == ErrorCode::NotFound {
+        GitError::NotRepository
+    } else {
+        GitError::Backend(error.message().to_string())
+    }
+}
+
+fn map_git_error(error: git2::Error) -> GitError {
+    map_repo_error(error)
 }

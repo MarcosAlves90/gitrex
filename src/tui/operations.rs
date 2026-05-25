@@ -166,15 +166,12 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        env,
-        fs,
-        path::{Path, PathBuf},
-        process::Command,
-    };
-
     use super::{build_snapshot, OperationRequest};
     use crate::git::GitClient;
+    use crate::test_support::{
+        checkout_branch, commit_all, configure_user, create_branch, current_dir_lock, init_repo,
+        write_file, CurrentDirGuard,
+    };
 
     #[test]
     fn request_labels_are_clear() {
@@ -185,15 +182,17 @@ mod tests {
 
     #[test]
     fn build_snapshot_includes_all_log_entries() {
-        let _guard = crate::test_support::current_dir_lock()
+        let _guard = current_dir_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        init_repo(temp.path());
-
-        let original_dir = env::current_dir().unwrap();
-        let _restore = CurrentDirGuard::new(original_dir.clone());
-        env::set_current_dir(temp.path()).unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        for index in 0..15 {
+            write_file(temp.path(), "README.md", &format!("commit {index}\n"));
+            commit_all(&repo, &format!("commit {index}"));
+        }
+        let _restore = CurrentDirGuard::push(temp.path());
 
         let client = GitClient::new();
         let snapshot = build_snapshot(&client).unwrap();
@@ -203,15 +202,22 @@ mod tests {
 
     #[test]
     fn build_snapshot_stays_on_current_branch_history() {
-        let _guard = crate::test_support::current_dir_lock()
+        let _guard = current_dir_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let temp = tempfile::TempDir::new().unwrap();
-        init_divergent_repo(temp.path());
-
-        let original_dir = env::current_dir().unwrap();
-        let _restore = CurrentDirGuard::new(original_dir.clone());
-        env::set_current_dir(temp.path()).unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        commit_all(&repo, "base commit");
+        create_branch(&repo, "feature/login", "HEAD");
+        checkout_branch(&repo, "feature/login");
+        write_file(temp.path(), "README.md", "feature work\n");
+        commit_all(&repo, "feature work");
+        checkout_branch(&repo, "main");
+        write_file(temp.path(), "README.md", "main work\n");
+        commit_all(&repo, "main work");
+        let _restore = CurrentDirGuard::push(temp.path());
 
         let client = GitClient::new();
         let snapshot = build_snapshot(&client).unwrap();
@@ -228,67 +234,4 @@ mod tests {
             .any(|entry| entry.subject == "feature work"));
     }
 
-    struct CurrentDirGuard {
-        original: PathBuf,
-    }
-
-    impl CurrentDirGuard {
-        fn new(original: PathBuf) -> Self {
-            Self { original }
-        }
-    }
-
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            let _ = env::set_current_dir(&self.original);
-        }
-    }
-
-    fn init_repo(path: &Path) {
-        run_git(path, &["init"]);
-        configure_repo(path);
-
-        for index in 0..15 {
-            write_file(path, "README.md", &format!("commit {index}\n"));
-            run_git(path, &["add", "README.md"]);
-            run_git(path, &["commit", "-m", &format!("commit {index}")]);
-        }
-    }
-
-    fn init_divergent_repo(path: &Path) {
-        run_git(path, &["init", "-b", "main"]);
-        configure_repo(path);
-
-        write_file(path, "README.md", "base\n");
-        run_git(path, &["add", "README.md"]);
-        run_git(path, &["commit", "-m", "base commit"]);
-
-        run_git(path, &["checkout", "-b", "feature/login"]);
-        write_file(path, "README.md", "feature work\n");
-        run_git(path, &["add", "README.md"]);
-        run_git(path, &["commit", "-m", "feature work"]);
-
-        run_git(path, &["checkout", "main"]);
-        write_file(path, "README.md", "main work\n");
-        run_git(path, &["add", "README.md"]);
-        run_git(path, &["commit", "-m", "main work"]);
-    }
-
-    fn configure_repo(path: &Path) {
-        run_git(path, &["config", "user.name", "Gitrex Test"]);
-        run_git(path, &["config", "user.email", "gitrex@example.com"]);
-    }
-
-    fn run_git(path: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(path)
-            .args(args)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git {:?} failed in {}", args, path.display());
-    }
-
-    fn write_file(path: &Path, name: &str, contents: &str) {
-        fs::write(PathBuf::from(path).join(name), contents).unwrap();
-    }
 }

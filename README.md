@@ -27,6 +27,7 @@
 
 - Defaults to a TUI in interactive terminals
 - Falls back to CLI behavior for scripts and pipes
+- Uses an embedded libgit2 backend, so it does not depend on the `git` binary being installed
 - Covers core repository operations: status, branch inspection, log review, checkout, switch, branch creation, clone, pull, and push
 - TUI includes a branch panel plus a wide `Git Graph` panel with tree lines, commit navigation, and commit actions
 
@@ -136,6 +137,8 @@ cargo test
 - Rust 2021
 - `clap` for CLI parsing
 - `crossterm` for terminal control
+- `git2` for the embedded Git backend
+- `chrono` for date formatting
 - `ratatui` for the TUI
 - `anyhow` and `thiserror` for error handling
 

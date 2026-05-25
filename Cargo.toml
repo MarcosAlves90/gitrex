@@ -7,6 +7,8 @@ edition = "2021"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+git2 = { version = "0.19", features = ["vendored-libgit2"] }
 ratatui = "0.29"
 thiserror = "2"
 
