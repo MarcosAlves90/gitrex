@@ -16,6 +16,7 @@ pub fn actions_copy(selected_branch: Option<&str>, sync_target: Option<&str>) ->
         "j/k or arrows = move",
         "1/2/3 = change pane",
         "Enter = open branch actions",
+        "/ = search branches",
         "In branch actions: create branch from source",
         "r = refresh",
         "q = quit",
@@ -24,6 +25,9 @@ pub fn actions_copy(selected_branch: Option<&str>, sync_target: Option<&str>) ->
         branch,
         "Sync target:",
         sync,
+        "Branch view:",
+        "remote refs are grouped by remote name",
+        "local refs show synced vs local-only status",
     ]
     .join("\n")
 }
@@ -45,6 +49,7 @@ mod tests {
         let copy = actions_copy(Some("feature/login"), Some("origin/feature/login"));
         assert!(copy.contains("feature/login"));
         assert!(copy.contains("Enter = open branch actions"));
+        assert!(copy.contains("/ = search branches"));
         assert!(copy.contains("origin/feature/login"));
         assert!(copy.contains("create branch from source"));
     }

@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -50,7 +49,9 @@ pub fn clone_repo(source: &Path, destination: &Path) -> Repository {
 pub fn clone_bare_repo(source: &Path, destination: &Path) -> Repository {
     let mut builder = RepoBuilder::new();
     builder.bare(true);
-    builder.clone(source.to_str().unwrap(), destination).unwrap()
+    builder
+        .clone(source.to_str().unwrap(), destination)
+        .unwrap()
 }
 
 pub fn configure_user(repo: &Repository) {
@@ -90,7 +91,11 @@ pub fn checkout_branch(repo: &Repository, branch: &str) {
 }
 
 pub fn create_branch(repo: &Repository, name: &str, target: &str) {
-    let target_commit = repo.revparse_single(target).unwrap().peel_to_commit().unwrap();
+    let target_commit = repo
+        .revparse_single(target)
+        .unwrap()
+        .peel_to_commit()
+        .unwrap();
     repo.branch(name, &target_commit, false).unwrap();
 }
 
@@ -109,9 +114,6 @@ pub fn set_remote_head(repo: &Repository, reference: &str) {
 pub fn push_branch(repo: &Repository, remote_name: &str, branch: &str) {
     let mut remote = repo.find_remote(remote_name).unwrap();
     remote
-        .push(
-            &[format!("refs/heads/{branch}:refs/heads/{branch}")],
-            None,
-        )
+        .push(&[format!("refs/heads/{branch}:refs/heads/{branch}")], None)
         .unwrap();
 }

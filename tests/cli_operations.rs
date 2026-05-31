@@ -41,19 +41,24 @@ fn cli_covers_core_git_operations_against_real_repos() {
 
     assert_gitrex(&worktree, &["branch"])
         .success()
-        .stdout(predicates::str::contains("* main -> origin/main"));
+        .stdout(predicates::str::contains("remote branches:"))
+        .stdout(predicates::str::contains("local branches:"))
+        .stdout(predicates::str::contains("* main [synced: origin/main]"));
 
     assert_gitrex(&worktree, &["log", "--limit", "1"])
         .success()
         .stdout(predicates::str::contains("initial commit"));
 
-    assert_gitrex(&worktree, &["create-branch", "feature/login", "--from", "main"])
-        .success()
-        .stdout(predicates::str::contains("created feature/login from main"));
+    assert_gitrex(
+        &worktree,
+        &["create-branch", "feature/login", "--from", "main"],
+    )
+    .success()
+    .stdout(predicates::str::contains("created feature/login from main"));
 
     assert_gitrex(&worktree, &["branch"])
         .success()
-        .stdout(predicates::str::contains("feature/login"));
+        .stdout(predicates::str::contains("feature/login [local-only]"));
 
     assert_gitrex(&worktree, &["checkout", "main"])
         .success()
@@ -64,10 +69,64 @@ fn cli_covers_core_git_operations_against_real_repos() {
         .stdout(predicates::str::contains("switched to feature/login"));
 
     let _cwd = CurrentDirGuard::push(temp.path());
-    assert_gitrex(temp.path(), &["clone", origin.to_str().unwrap(), clone_dir.to_str().unwrap()])
-        .success()
-        .stdout(predicates::str::contains("clone complete"));
+    assert_gitrex(
+        temp.path(),
+        &[
+            "clone",
+            origin.to_str().unwrap(),
+            clone_dir.to_str().unwrap(),
+        ],
+    )
+    .success()
+    .stdout(predicates::str::contains("clone complete"));
     assert!(clone_dir.join(".git").exists());
+}
+
+#[test]
+fn cli_branch_view_separates_multiple_remotes() {
+    let _guard = current_dir_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let temp = TempDir::new().unwrap();
+    let seed = temp.path().join("seed");
+    let origin = temp.path().join("origin.git");
+    let upstream = temp.path().join("upstream.git");
+    let worktree = temp.path().join("worktree");
+
+    let seed_repo = init_repo(&seed, "main");
+    configure_user(&seed_repo);
+    write_file(&seed, "README.md", "base\n");
+    commit_all(&seed_repo, "base");
+
+    let origin_repo = clone_bare_repo(&seed, &origin);
+    set_remote_head(&origin_repo, "refs/heads/main");
+    let upstream_repo = clone_bare_repo(&seed, &upstream);
+    set_remote_head(&upstream_repo, "refs/heads/main");
+
+    let worktree_repo = clone_repo(&origin, &worktree);
+    configure_user(&worktree_repo);
+    set_upstream(&worktree_repo, "main", "origin/main");
+    worktree_repo
+        .remote("upstream", upstream.to_str().unwrap())
+        .unwrap();
+    worktree_repo
+        .find_remote("upstream")
+        .unwrap()
+        .fetch(&["main"], None, None)
+        .unwrap();
+
+    let _cwd = CurrentDirGuard::push(&worktree);
+
+    assert_gitrex(&worktree, &["branch"])
+        .success()
+        .stdout(predicates::str::contains("remote branches:"))
+        .stdout(predicates::str::contains("origin"))
+        .stdout(predicates::str::contains("upstream"))
+        .stdout(predicates::str::contains("local branches:"))
+        .stdout(predicates::str::contains(
+            "* main [synced: origin/main, upstream/main]",
+        ));
 }
 
 #[test]

@@ -1,8 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEvent};
 
-use crate::{
-    git::GitClient,
-};
+use crate::git::GitClient;
 
 use super::{
     app::{App, CommitAction, MessageKind, PickerAction, View},
@@ -43,7 +41,8 @@ impl TuiController {
             snapshot.history,
             snapshot.selected_branch,
         );
-        self.app.set_feedback("Repository refreshed.", MessageKind::Success);
+        self.app
+            .set_feedback("Repository refreshed.", MessageKind::Success);
         Ok(())
     }
 
@@ -61,7 +60,8 @@ impl TuiController {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.operation_rx = None;
                 self.app.stop_loading();
-                self.app.set_feedback("Operation aborted unexpectedly.", MessageKind::Error);
+                self.app
+                    .set_feedback("Operation aborted unexpectedly.", MessageKind::Error);
                 Ok(())
             }
         }
@@ -94,22 +94,28 @@ impl TuiController {
         let label = operation.loading_label();
         self.app.start_loading(label.clone());
         self.operation_rx = Some(self.runner.spawn(operation));
-        self.app.set_feedback(format!("{label}..."), MessageKind::Info);
+        self.app
+            .set_feedback(format!("{label}..."), MessageKind::Info);
         Ok(())
     }
 
     fn start_branch_creation(&mut self) -> anyhow::Result<()> {
         let Some((branch, start_point)) = self.app.branch_create_request() else {
-            self.app.set_feedback("Type a branch name first.", MessageKind::Warning);
+            self.app
+                .set_feedback("Type a branch name first.", MessageKind::Warning);
             return Ok(());
         };
 
-        let operation = OperationRequest::CreateBranch { branch, start_point };
+        let operation = OperationRequest::CreateBranch {
+            branch,
+            start_point,
+        };
         let label = operation.loading_label();
         self.app.close_branch_creator();
         self.app.start_loading(label.clone());
         self.operation_rx = Some(self.runner.spawn(operation));
-        self.app.set_feedback(format!("{label}..."), MessageKind::Info);
+        self.app
+            .set_feedback(format!("{label}..."), MessageKind::Info);
         Ok(())
     }
 }
@@ -122,6 +128,11 @@ enum Intent {
     SelectView(View),
     MoveSelection(isize),
     MoveCommitSelection(isize),
+    OpenBranchSearch,
+    CloseBranchSearch,
+    DeleteBranchSearchChar,
+    TypeBranchSearchChar(char),
+    ConfirmBranchSearch,
     OpenPicker,
     ClosePicker,
     OpenCommitActions,
@@ -144,6 +155,16 @@ impl TuiController {
                 KeyCode::Enter => Intent::ConfirmBranchCreate,
                 KeyCode::Backspace => Intent::DeleteBranchName,
                 KeyCode::Char(ch) => Intent::TypeBranchName(ch),
+                _ => Intent::None,
+            };
+        }
+
+        if self.app.branch_search_is_open() {
+            return match key.code {
+                KeyCode::Esc => Intent::CloseBranchSearch,
+                KeyCode::Enter => Intent::ConfirmBranchSearch,
+                KeyCode::Backspace => Intent::DeleteBranchSearchChar,
+                KeyCode::Char(ch) => Intent::TypeBranchSearchChar(ch),
                 _ => Intent::None,
             };
         }
@@ -186,6 +207,9 @@ impl TuiController {
             KeyCode::Char('k') | KeyCode::Up if matches!(self.app.view, View::Log) => {
                 Intent::MoveCommitSelection(-1)
             }
+            KeyCode::Char('/') if matches!(self.app.view, View::Branches) => {
+                Intent::OpenBranchSearch
+            }
             KeyCode::Enter if matches!(self.app.view, View::Branches) => Intent::OpenPicker,
             KeyCode::Enter if matches!(self.app.view, View::Log) => Intent::OpenCommitActions,
             _ => Intent::None,
@@ -211,6 +235,28 @@ impl TuiController {
             }
             Intent::MoveCommitSelection(delta) => {
                 self.app.move_commit_selection(delta);
+                Ok(false)
+            }
+            Intent::OpenBranchSearch => {
+                self.app.open_branch_search();
+                Ok(false)
+            }
+            Intent::CloseBranchSearch => {
+                self.app.close_branch_search();
+                Ok(false)
+            }
+            Intent::DeleteBranchSearchChar => {
+                self.app.pop_branch_search_char();
+                Ok(false)
+            }
+            Intent::TypeBranchSearchChar(ch) => {
+                self.app.push_branch_search_char(ch);
+                Ok(false)
+            }
+            Intent::ConfirmBranchSearch => {
+                if self.app.confirm_branch_search() {
+                    self.refresh_selected_branch_history()?;
+                }
                 Ok(false)
             }
             Intent::OpenPicker => {
@@ -352,7 +398,8 @@ impl TuiController {
         let label = operation.loading_label();
         self.app.start_loading(label.clone());
         self.operation_rx = Some(self.runner.spawn(operation));
-        self.app.set_feedback(format!("{label}..."), MessageKind::Info);
+        self.app
+            .set_feedback(format!("{label}..."), MessageKind::Info);
         Ok(())
     }
 
@@ -361,7 +408,10 @@ impl TuiController {
             return Ok(());
         };
 
-        let history = self.client.history_for_ref(&branch).map_err(anyhow::Error::msg)?;
+        let history = self
+            .client
+            .history_for_ref(&branch)
+            .map_err(anyhow::Error::msg)?;
         self.app.apply_graph_history(history);
         Ok(())
     }
@@ -370,13 +420,12 @@ impl TuiController {
         self.app.stop_loading();
         match outcome {
             OperationOutcome::Success { snapshot, message } => {
-                self.app
-                    .apply_snapshot(
-                        snapshot.status.unwrap(),
-                        snapshot.branches,
-                        snapshot.history,
-                        snapshot.selected_branch,
-                    );
+                self.app.apply_snapshot(
+                    snapshot.status.unwrap(),
+                    snapshot.branches,
+                    snapshot.history,
+                    snapshot.selected_branch,
+                );
                 self.app.set_feedback(message, MessageKind::Success);
             }
             OperationOutcome::Error(message) => {
@@ -392,10 +441,13 @@ mod tests {
     use super::{Intent, TuiController, View};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
-    use crate::{domain::{BranchInfo, BranchKind, CommitSummary, RepoStatus}, git::GitClient};
     use crate::test_support::{
         checkout_branch, commit_all, configure_user, create_branch, current_dir_lock, init_repo,
         write_file, CurrentDirGuard,
+    };
+    use crate::{
+        domain::{BranchInfo, BranchKind, CommitSummary, RepoStatus},
+        git::GitClient,
     };
 
     #[test]
@@ -413,6 +465,21 @@ mod tests {
         assert!(matches!(
             controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Intent::OpenCommitActions
+        ));
+    }
+
+    #[test]
+    fn controller_routes_branch_search_input_when_open() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().open_branch_search();
+
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+            Intent::TypeBranchSearchChar('f')
+        ));
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Intent::ConfirmBranchSearch
         ));
     }
 
@@ -462,6 +529,7 @@ mod tests {
             subject: "init".to_string(),
             kind: BranchKind::Local,
         }];
+        controller.app_mut().selected_branch = Some("main".to_string());
         controller.app_mut().status = Some(RepoStatus {
             branch_name: "main".to_string(),
             upstream: None,
@@ -475,7 +543,10 @@ mod tests {
         controller.confirm_picker().unwrap();
 
         assert!(controller.app().branch_create_is_open());
-        assert_eq!(controller.app().branch_create_source.as_deref(), Some("main"));
+        assert_eq!(
+            controller.app().branch_create_source.as_deref(),
+            Some("main")
+        );
     }
 
     #[test]
@@ -516,6 +587,7 @@ mod tests {
                 kind: BranchKind::Local,
             },
         ];
+        controller.app_mut().selected_branch = Some("main".to_string());
         controller.app_mut().status = Some(RepoStatus {
             branch_name: "main".to_string(),
             upstream: None,
@@ -549,5 +621,4 @@ mod tests {
             .iter()
             .any(|entry| entry.subject == "main work"));
     }
-
 }

@@ -27,7 +27,11 @@ pub fn read_status(client: &GitClient) -> crate::domain::Result<RepoStatus> {
 
 pub fn parse_status_output(output: &str) -> RepoStatus {
     let mut lines = output.lines();
-    let branch_line = lines.next().unwrap_or_default().trim_start_matches("## ").trim();
+    let branch_line = lines
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches("## ")
+        .trim();
 
     let (branch_name, upstream, ahead, behind) = parse_branch_header(branch_line);
     let files = lines
@@ -44,7 +48,9 @@ pub fn parse_status_output(output: &str) -> RepoStatus {
 }
 
 fn upstream_name(repo: &Repository, branch_name: &str) -> Option<String> {
-    let branch = repo.find_branch(branch_name, git2::BranchType::Local).ok()?;
+    let branch = repo
+        .find_branch(branch_name, git2::BranchType::Local)
+        .ok()?;
     branch
         .upstream()
         .ok()?

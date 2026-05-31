@@ -29,14 +29,14 @@
 - Falls back to CLI behavior for scripts and pipes
 - Uses an embedded libgit2 backend, so it does not depend on the `git` binary being installed
 - Covers core repository operations: status, branch inspection, log review, checkout, switch, branch creation, clone, pull, and push
-- TUI includes a branch panel plus a wide `Git Graph` panel with tree lines, commit navigation, and commit actions
+- TUI includes a branch panel that separates remote refs from local branches, plus a wide `Git Graph` panel with tree lines, commit navigation, and commit actions
 
 ## Features
 
 | Workflow | What you get |
 | --- | --- |
 | Repository status | Branch, upstream, divergence, and working tree changes |
-| Branch management | List branches, checkout, switch, and create branches from another ref |
+| Branch management | List remote refs by remote, show local-only and synced branches, checkout, switch, and create branches from another ref |
 | Commit history | Compact log output with configurable limits |
 | Git graph | Full commit tree, commit selection, rotating selected subject text, and commit actions |
 | Remote operations | Clone, pull, and push from the same CLI |
@@ -60,6 +60,7 @@ cargo run -- tui
 
 - `1/2/3` switch between status, branches, and graph
 - `j/k` or arrow keys move within the active panel
+- In `Branches`, `/` opens branch search and filters both local and remote refs
 - In `Branches`, `Enter` opens branch actions
 - In `Git Graph`, `Enter` opens commit actions for the hovered commit
 - The selected commit subject scrolls when it does not fit, while date and hash stay aligned
@@ -78,7 +79,7 @@ gitrex log --limit 20
 | --- | --- |
 | `gitrex` | Launches the TUI in interactive terminals |
 | `gitrex status` | Prints the current branch, upstream, divergence, and working tree state |
-| `gitrex branch` | Lists local branches and upstream tracking refs |
+| `gitrex branch` | Lists remote branches grouped by remote and local branches with sync status |
 | `gitrex log --limit <n>` | Shows recent commits, defaulting to 20 |
 | `gitrex checkout <target>` | Checks out an existing branch or ref |
 | `gitrex switch <target>` | Switches to a branch |
@@ -97,9 +98,16 @@ working tree: clean
 ```
 
 ```text
-* main -> origin/main
-  feature/login
-  release
+remote branches:
+  origin
+    main
+    feature/login
+  upstream
+    main
+local branches:
+* main [synced: origin/main, upstream/main]
+  feature/login [local-only]
+  release [local-only]
 ```
 
 ## How It Fits Together

@@ -133,7 +133,13 @@ mod tests {
         let sample = "*\tabc123\tMarcos\t2026-05-18\tInitial commit\n|/  \n";
         let entries = parse_graph_log_lines(sample);
         assert_eq!(entries.len(), 2);
-        assert!(matches!(entries[0], crate::domain::GraphLine::Commit { .. }));
-        assert!(matches!(entries[1], crate::domain::GraphLine::Connector { .. }));
+        assert!(matches!(
+            entries[0],
+            crate::domain::GraphLine::Commit { .. }
+        ));
+        assert!(matches!(
+            entries[1],
+            crate::domain::GraphLine::Connector { .. }
+        ));
     }
 }

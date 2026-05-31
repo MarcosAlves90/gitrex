@@ -5,7 +5,9 @@ use ratatui::{
 
 use crate::{
     cli::output,
-    domain::{BranchHistory, BranchInfo, CommitSummary, GraphLine, RepoStatus},
+    domain::{
+        build_branch_catalog, BranchHistory, BranchInfo, CommitSummary, GraphLine, RepoStatus,
+    },
 };
 
 use super::{layout, theme, widgets};
@@ -67,13 +69,16 @@ pub struct App {
     pub(crate) branches: Vec<BranchInfo>,
     pub(crate) log: Vec<CommitSummary>,
     pub(crate) graph: Vec<GraphLine>,
-    pub(crate) selected_branch: usize,
+    pub(crate) selected_branch: Option<String>,
     pub(crate) selected_commit: usize,
     pub(crate) picker_open: bool,
     pub(crate) picker_index: usize,
     pub(crate) commit_actions_open: bool,
     pub(crate) commit_action_index: usize,
     pub(crate) graph_scroll_offset: usize,
+    pub(crate) branch_filter: String,
+    pub(crate) branch_search_open: bool,
+    pub(crate) branch_search_input: String,
     pub(crate) branch_create_open: bool,
     pub(crate) branch_create_source: Option<String>,
     pub(crate) branch_create_name: String,
@@ -90,13 +95,16 @@ impl App {
             branches: Vec::new(),
             log: Vec::new(),
             graph: Vec::new(),
-            selected_branch: 0,
+            selected_branch: None,
             selected_commit: 0,
             picker_open: false,
             picker_index: 0,
             commit_actions_open: false,
             commit_action_index: 0,
             graph_scroll_offset: 0,
+            branch_filter: String::new(),
+            branch_search_open: false,
+            branch_search_input: String::new(),
             branch_create_open: false,
             branch_create_source: None,
             branch_create_name: String::new(),
@@ -116,14 +124,54 @@ impl App {
     }
 
     pub fn selected_branch(&self) -> Option<&BranchInfo> {
-        self.local_branches().get(self.selected_branch).copied()
+        let selected = self.selected_branch.as_deref()?;
+        self.branches.iter().find(|branch| {
+            matches!(branch.kind, crate::domain::BranchKind::Local) && branch.name == selected
+        })
     }
 
     pub fn local_branches(&self) -> Vec<&BranchInfo> {
-        self.branches
-            .iter()
-            .filter(|branch| matches!(branch.kind, crate::domain::BranchKind::Local))
-            .collect()
+        self.filtered_local_branches()
+    }
+
+    pub fn open_branch_search(&mut self) {
+        self.branch_search_open = true;
+        self.branch_search_input = self.branch_filter.clone();
+        self.set_feedback(
+            "Type a branch filter and press Enter to apply.",
+            MessageKind::Info,
+        );
+    }
+
+    pub fn branch_search_is_open(&self) -> bool {
+        self.branch_search_open
+    }
+
+    pub fn push_branch_search_char(&mut self, ch: char) {
+        if self.branch_search_open && (ch.is_ascii_graphic() || ch == ' ') {
+            self.branch_search_input.push(ch);
+        }
+    }
+
+    pub fn pop_branch_search_char(&mut self) {
+        if self.branch_search_open {
+            self.branch_search_input.pop();
+        }
+    }
+
+    pub fn confirm_branch_search(&mut self) -> bool {
+        if !self.branch_search_open {
+            return false;
+        }
+
+        self.branch_search_open = false;
+        self.branch_filter = self.branch_search_input.trim().to_string();
+        self.ensure_selected_branch_visible()
+    }
+
+    pub fn close_branch_search(&mut self) {
+        self.branch_search_open = false;
+        self.branch_search_input.clear();
     }
 
     pub fn picker_actions(&self) -> &'static [PickerAction] {
@@ -151,19 +199,27 @@ impl App {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let branch_count = self.local_branches().len();
+        let branches = self.filtered_local_branches();
+        let branch_count = branches.len();
         if branch_count == 0 {
-            self.selected_branch = 0;
+            self.selected_branch = None;
             return;
         }
 
+        let current_index = self
+            .selected_branch
+            .as_deref()
+            .and_then(|selected| branches.iter().position(|branch| branch.name == selected))
+            .unwrap_or(0);
         let next = if delta.is_negative() {
-            self.selected_branch.saturating_sub(delta.unsigned_abs())
+            current_index.saturating_sub(delta.unsigned_abs())
         } else {
-            self.selected_branch.saturating_add(delta as usize)
+            current_index.saturating_add(delta as usize)
         };
-
-        self.selected_branch = next.min(branch_count.saturating_sub(1));
+        let selected = branches[next.min(branch_count.saturating_sub(1))]
+            .name
+            .clone();
+        self.selected_branch = Some(selected);
     }
 
     pub fn move_commit_selection(&mut self, delta: isize) {
@@ -215,7 +271,10 @@ impl App {
         }
         self.commit_actions_open = true;
         self.commit_action_index = 0;
-        self.set_feedback("Choose an action for the selected commit.", MessageKind::Info);
+        self.set_feedback(
+            "Choose an action for the selected commit.",
+            MessageKind::Info,
+        );
     }
 
     pub fn close_commit_actions(&mut self) {
@@ -235,10 +294,7 @@ impl App {
         self.branch_create_open = true;
         self.branch_create_source = Some(source);
         self.branch_create_name.clear();
-        self.set_feedback(
-            "Type a new branch name and press Enter.",
-            MessageKind::Info,
-        );
+        self.set_feedback("Type a new branch name and press Enter.", MessageKind::Info);
     }
 
     pub fn close_branch_creator(&mut self) {
@@ -272,6 +328,68 @@ impl App {
         self.log.get(self.selected_commit)
     }
 
+    fn branch_filter_matches(&self, branch: &BranchInfo) -> bool {
+        let query = self.branch_filter.trim();
+        if query.is_empty() {
+            return true;
+        }
+
+        let query = query.to_ascii_lowercase();
+        let display_name = branch.display_name().to_ascii_lowercase();
+        [
+            branch.name.to_ascii_lowercase(),
+            branch.commit.to_ascii_lowercase(),
+            branch.subject.to_ascii_lowercase(),
+            branch
+                .upstream
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            display_name,
+        ]
+        .iter()
+        .any(|haystack| haystack.contains(&query))
+    }
+
+    fn filtered_local_branches(&self) -> Vec<&BranchInfo> {
+        let mut branches = self
+            .branches
+            .iter()
+            .filter(|branch| matches!(branch.kind, crate::domain::BranchKind::Local))
+            .filter(|branch| self.branch_filter_matches(branch))
+            .collect::<Vec<_>>();
+        branches.sort_by(|left, right| {
+            right
+                .current
+                .cmp(&left.current)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        branches
+    }
+
+    fn ensure_selected_branch_visible(&mut self) -> bool {
+        let local_branches = self.filtered_local_branches();
+        if local_branches.is_empty() {
+            let changed = self.selected_branch.is_some();
+            self.selected_branch = None;
+            return changed;
+        }
+
+        let selected_visible = self.selected_branch.as_deref().and_then(|selected| {
+            local_branches
+                .iter()
+                .position(|branch| branch.name == selected)
+        });
+        if selected_visible.is_some() {
+            return false;
+        }
+
+        let selected = local_branches[0].name.clone();
+        let changed = self.selected_branch.as_deref() != Some(selected.as_str());
+        self.selected_branch = Some(selected);
+        changed
+    }
+
     pub fn move_picker(&mut self, delta: isize) {
         let count = self.picker_actions().len();
         if count == 0 {
@@ -293,7 +411,8 @@ impl App {
         }
 
         let next = if delta.is_negative() {
-            self.commit_action_index.saturating_sub(delta.unsigned_abs())
+            self.commit_action_index
+                .saturating_sub(delta.unsigned_abs())
         } else {
             self.commit_action_index.saturating_add(delta as usize)
         };
@@ -330,7 +449,7 @@ impl App {
         status: RepoStatus,
         branches: Vec<BranchInfo>,
         history: BranchHistory,
-        selected_branch: usize,
+        selected_branch: Option<String>,
     ) {
         self.status = Some(status);
         self.branches = branches;
@@ -338,6 +457,7 @@ impl App {
         self.graph = history.graph;
         self.selected_branch = selected_branch;
         self.selected_commit = self.selected_commit.min(self.log.len().saturating_sub(1));
+        let _ = self.ensure_selected_branch_visible();
     }
 
     pub fn apply_graph_history(&mut self, history: BranchHistory) {
@@ -358,11 +478,14 @@ impl App {
         let [header, body, actions, footer] = layout::dashboard(frame.area());
         let [left, right] = layout::body(body);
         let [status_area, branches_area] = layout::left_column(left);
+        let [search_area, remote_area, local_area] = layout::branch_sections(branches_area);
 
         frame.render_widget(self.render_header(), header);
         frame.render_widget(self.render_status(), status_area);
+        frame.render_widget(self.render_branch_search(), search_area);
+        frame.render_widget(self.render_remote_branches(), remote_area);
         let mut branch_state = self.branch_state();
-        frame.render_stateful_widget(self.render_branches(), branches_area, &mut branch_state);
+        frame.render_stateful_widget(self.render_local_branches(), local_area, &mut branch_state);
         let mut graph_state = self.graph_state();
         frame.render_stateful_widget(self.render_graph(right.width), right, &mut graph_state);
         frame.render_widget(self.render_actions(), actions);
@@ -395,7 +518,10 @@ impl App {
                 status.files.len(),
                 widgets::mode_label(self.view)
             ),
-            None => format!("No repository loaded  •  {}", widgets::mode_label(self.view)),
+            None => format!(
+                "No repository loaded  •  {}",
+                widgets::mode_label(self.view)
+            ),
         };
 
         Paragraph::new(text)
@@ -403,7 +529,11 @@ impl App {
             .block(
                 Block::default()
                     .title("gitrex")
-                    .title_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
+                    .title_style(
+                        Style::default()
+                            .fg(theme::ACCENT)
+                            .add_modifier(Modifier::BOLD),
+                    )
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::ACCENT)),
             )
@@ -427,14 +557,119 @@ impl App {
             )
     }
 
-    fn render_branches(&self) -> List<'_> {
-        let selected = self.selected_branch.min(self.local_branches().len().saturating_sub(1));
-        let items = self
-            .local_branches()
+    fn render_branch_search(&self) -> Paragraph<'_> {
+        let text = if self.branch_search_open {
+            format!(
+                "Search branches: {}_\nEnter = apply • Esc = cancel",
+                self.branch_search_input
+            )
+        } else if self.branch_filter.trim().is_empty() {
+            String::from("Search branches with / to filter both local and remote refs.")
+        } else {
+            format!(
+                "Search filter: {}\nPress / to edit or clear the filter.",
+                self.branch_filter
+            )
+        };
+
+        Paragraph::new(text)
+            .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT))
+            .block(
+                Block::default()
+                    .title("Branch Search")
+                    .title_style(Style::default().fg(theme::MUTED))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::MUTED)),
+            )
+    }
+
+    fn render_remote_branches(&self) -> List<'_> {
+        let catalog = build_branch_catalog(&self.branches);
+        let query = self.branch_filter.trim().to_ascii_lowercase();
+        let mut items = Vec::new();
+        let mut total = 0usize;
+        let mut groups = 0usize;
+
+        for group in catalog.remotes {
+            let group_matches = query.is_empty()
+                || group.remote.to_ascii_lowercase().contains(&query)
+                || group
+                    .branches
+                    .iter()
+                    .any(|branch| self.branch_filter_matches(branch));
+            if !group_matches {
+                continue;
+            }
+
+            groups = groups.saturating_add(1);
+            items.push(
+                ListItem::new(format!("{}:", group.remote)).style(
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            );
+
+            for branch in group.branches {
+                if !self.branch_filter_matches(&branch)
+                    && !group.remote.to_ascii_lowercase().contains(&query)
+                {
+                    continue;
+                }
+                total = total.saturating_add(1);
+                items.push(
+                    ListItem::new(format!("  {}", branch.branch_short_name()))
+                        .style(Style::default().fg(theme::TEXT)),
+                );
+            }
+        }
+
+        if items.is_empty() {
+            items.push(ListItem::new(
+                "No remote branches match the current filter.",
+            ));
+        }
+
+        List::new(items).block(
+            Block::default()
+                .title(format!(
+                    "Remote branches ({groups} remote(s), {total} ref(s))"
+                ))
+                .title_style(Style::default().fg(theme::PURPLE))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::PURPLE)),
+        )
+    }
+
+    fn render_local_branches(&self) -> List<'_> {
+        let local_branches = self.local_branches();
+        let catalog = build_branch_catalog(&self.branches);
+        let total = local_branches.len();
+        let selected = self
+            .selected_branch
+            .as_deref()
+            .and_then(|selected| {
+                local_branches
+                    .iter()
+                    .position(|branch| branch.name == selected)
+            })
+            .unwrap_or(0);
+        let items = local_branches
             .into_iter()
             .map(|branch| {
                 let marker = if branch.current { "●" } else { " " };
-                let text = format!("{marker} {}", branch.name);
+                let synced = catalog
+                    .locals
+                    .iter()
+                    .find(|entry| entry.branch.name == branch.name)
+                    .map(|entry| entry.synced_remotes.clone())
+                    .unwrap_or_default();
+                let sync_label = if synced.is_empty() {
+                    String::from(" [local-only]")
+                } else {
+                    format!(" [synced: {}]", synced.join(", "))
+                };
+                let text = format!("{marker} {}{sync_label}", branch.name);
                 let style = if branch.current {
                     Style::default()
                         .fg(theme::SUCCESS)
@@ -458,9 +693,9 @@ impl App {
             .block(
                 Block::default()
                     .title(format!(
-                        "Branches ({}/{})",
+                        "Local branches ({}/{})",
                         selected.saturating_add(1),
-                        self.local_branches().len().max(1)
+                        total.max(1)
                     ))
                     .title_style(Style::default().fg(theme::ACCENT))
                     .borders(Borders::ALL)
@@ -475,13 +710,17 @@ impl App {
             self.graph_scroll_offset,
             width,
         )
-            .into_iter()
-            .map(ListItem::new)
-            .collect::<Vec<_>>();
+        .into_iter()
+        .map(ListItem::new)
+        .collect::<Vec<_>>();
         let title = output::render_graph_title(
             self.selected_branch()
                 .map(|branch| branch.name.as_str())
-                .or_else(|| self.status.as_ref().map(|status| status.branch_name.as_str())),
+                .or_else(|| {
+                    self.status
+                        .as_ref()
+                        .map(|status| status.branch_name.as_str())
+                }),
         );
 
         List::new(items)
@@ -542,9 +781,18 @@ impl App {
             ]
             .join("\n")
         } else {
-            widgets::actions_copy(
-                self.selected_branch().map(|b| b.name.as_str()),
-                self.sync_target_display().as_deref(),
+            let filter = if self.branch_filter.trim().is_empty() {
+                "none".to_string()
+            } else {
+                self.branch_filter.clone()
+            };
+            format!(
+                "{}\n\nSearch filter:\n{}",
+                widgets::actions_copy(
+                    self.selected_branch().map(|b| b.name.as_str()),
+                    self.sync_target_display().as_deref(),
+                ),
+                filter
             )
         };
 
@@ -593,7 +841,11 @@ impl App {
             .iter()
             .enumerate()
             .map(|(index, action)| {
-                let prefix = if index == self.picker_index { "▶" } else { " " };
+                let prefix = if index == self.picker_index {
+                    "▶"
+                } else {
+                    " "
+                };
                 format!("{prefix} {}", action.label())
             })
             .collect::<Vec<_>>()
@@ -613,10 +865,7 @@ impl App {
     }
 
     fn render_branch_creator(&self) -> Paragraph<'_> {
-        let source = self
-            .branch_create_source
-            .as_deref()
-            .unwrap_or("unknown");
+        let source = self.branch_create_source.as_deref().unwrap_or("unknown");
         let name = if self.branch_create_name.is_empty() {
             "<type new branch name>"
         } else {
@@ -666,7 +915,11 @@ impl App {
         .block(
             Block::default()
                 .title("Commit Actions")
-                .title_style(Style::default().fg(theme::PURPLE).add_modifier(Modifier::BOLD))
+                .title_style(
+                    Style::default()
+                        .fg(theme::PURPLE)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::PURPLE)),
         )
@@ -674,10 +927,14 @@ impl App {
 
     fn branch_state(&self) -> ListState {
         let mut state = ListState::default();
-        if !self.local_branches().is_empty() {
-            state.select(Some(
-                self.selected_branch.min(self.local_branches().len().saturating_sub(1)),
-            ));
+        let branches = self.local_branches();
+        if !branches.is_empty() {
+            let selected = self
+                .selected_branch
+                .as_deref()
+                .and_then(|selected| branches.iter().position(|branch| branch.name == selected))
+                .unwrap_or(0);
+            state.select(Some(selected.min(branches.len().saturating_sub(1))));
         }
         state
     }
@@ -686,9 +943,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{App, CommitAction, MessageKind, PickerAction, View};
-    use crate::{
-        domain::{BranchInfo, BranchKind, RepoStatus},
-    };
+    use crate::domain::{BranchInfo, BranchKind, RepoStatus};
 
     #[test]
     fn picker_action_labels_are_clear() {
@@ -735,6 +990,45 @@ mod tests {
 
         app.move_selection(-1);
         assert_eq!(app.selected_branch().unwrap().name, "main");
+    }
+
+    #[test]
+    fn branch_search_keeps_selection_on_visible_local_branches() {
+        let mut app = App::new();
+        app.branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: Some("origin/main".to_string()),
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "feature/login".to_string(),
+                current: false,
+                upstream: None,
+                commit: "def".to_string(),
+                subject: "feature".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+        app.move_selection(1);
+        assert_eq!(app.selected_branch().unwrap().name, "feature/login");
+
+        app.open_branch_search();
+        app.branch_search_input = "main".to_string();
+        assert!(app.confirm_branch_search());
+        assert_eq!(app.selected_branch().unwrap().name, "main");
+        assert_eq!(app.local_branches().len(), 1);
     }
 
     #[test]
@@ -788,6 +1082,7 @@ mod tests {
             subject: "init".to_string(),
             kind: BranchKind::Local,
         }];
+        app.selected_branch = Some("main".to_string());
 
         app.open_branch_creator();
 
@@ -852,7 +1147,10 @@ mod tests {
     fn commit_actions_are_ordered() {
         let app = App::new();
         assert_eq!(app.commit_actions()[0], CommitAction::CheckoutCommit);
-        assert_eq!(app.commit_actions()[1], CommitAction::CreateBranchFromCommit);
+        assert_eq!(
+            app.commit_actions()[1],
+            CommitAction::CreateBranchFromCommit
+        );
     }
 
     #[test]
