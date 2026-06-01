@@ -397,7 +397,8 @@ impl TuiController {
 
         match action {
             RemoteBranchAction::CreateLocalBranch => {
-                self.app.open_branch_creator_from_source(branch.full_ref());
+                self.app
+                    .open_branch_creator_from_source(branch.full_ref(), crate::tui::theme::PURPLE);
                 Ok(())
             }
             RemoteBranchAction::CheckoutDetached => self.start_detached_checkout(branch.full_ref()),
@@ -427,7 +428,8 @@ impl TuiController {
                     .selected_commit()
                     .map(|commit| commit.hash.clone())
                     .ok_or_else(|| anyhow::anyhow!("No commit selected."))?;
-                self.app.open_branch_creator_from_source(source);
+                self.app
+                    .open_branch_creator_from_source(source, crate::tui::theme::PURPLE);
                 Ok(())
             }
         }

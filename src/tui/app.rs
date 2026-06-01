@@ -122,6 +122,7 @@ pub struct App {
     pub(crate) branch_search_input: String,
     pub(crate) branch_create_open: bool,
     pub(crate) branch_create_source: Option<String>,
+    pub(crate) branch_create_accent: ratatui::style::Color,
     pub(crate) branch_create_name: String,
     pub(crate) loading: Option<String>,
     pub(crate) message: String,
@@ -152,6 +153,7 @@ impl App {
             branch_search_input: String::new(),
             branch_create_open: false,
             branch_create_source: None,
+            branch_create_accent: theme::ACCENT,
             branch_create_name: String::new(),
             loading: None,
             message: String::from("Press q to quit, r to refresh, Enter for branch actions."),
@@ -166,6 +168,9 @@ impl App {
 
     pub fn select_view(&mut self, view: View) {
         self.view = view;
+        if matches!(self.view, View::Branches) {
+            self.ensure_active_branch_selection_visible();
+        }
     }
 
     pub fn selected_branch(&self) -> Option<&BranchInfo> {
@@ -189,6 +194,7 @@ impl App {
 
     pub fn set_branch_panel(&mut self, panel: BranchPanel) {
         self.branch_panel = panel;
+        self.ensure_active_branch_selection_visible();
     }
 
     pub fn toggle_branch_panel(&mut self) {
@@ -409,6 +415,7 @@ impl App {
     }
 
     pub fn open_picker(&mut self) {
+        self.ensure_active_branch_selection_visible();
         if self.selected_branch().is_none() {
             self.set_feedback("No branch selected.", MessageKind::Warning);
             return;
@@ -424,6 +431,7 @@ impl App {
     }
 
     pub fn open_remote_picker(&mut self) {
+        self.ensure_active_branch_selection_visible();
         if self.selected_remote_branch().is_none() {
             self.set_feedback("No remote branch selected.", MessageKind::Warning);
             return;
@@ -456,17 +464,23 @@ impl App {
     }
 
     pub fn open_branch_creator(&mut self) {
+        self.ensure_active_branch_selection_visible();
         let Some(source) = self.selected_branch().map(|branch| branch.name.clone()) else {
             self.set_feedback("No branch selected.", MessageKind::Warning);
             return;
         };
 
-        self.open_branch_creator_from_source(source);
+        self.open_branch_creator_from_source(source, theme::ACCENT);
     }
 
-    pub fn open_branch_creator_from_source(&mut self, source: String) {
+    pub fn open_branch_creator_from_source(
+        &mut self,
+        source: String,
+        accent: ratatui::style::Color,
+    ) {
         self.branch_create_open = true;
         self.branch_create_source = Some(source);
+        self.branch_create_accent = accent;
         self.branch_create_name.clear();
         self.set_feedback("Type a new branch name and press Enter.", MessageKind::Info);
     }
@@ -601,6 +615,17 @@ impl App {
         let changed = self.selected_remote_branch.as_deref() != Some(selected.as_str());
         self.selected_remote_branch = Some(selected);
         changed
+    }
+
+    fn ensure_active_branch_selection_visible(&mut self) {
+        match self.branch_panel {
+            BranchPanel::Local => {
+                let _ = self.ensure_selected_local_branch_visible();
+            }
+            BranchPanel::Remote => {
+                let _ = self.ensure_selected_remote_branch_visible();
+            }
+        }
     }
 
     pub fn move_picker(&mut self, delta: isize) {
@@ -765,35 +790,98 @@ impl App {
     }
 
     fn render_header(&self) -> Paragraph<'_> {
-        let text = match &self.status {
-            Some(status) => format!(
-                "{}  •  {} file(s) changed  •  {}",
-                status.branch_name,
-                status.files.len(),
-                widgets::mode_label(self.view)
-            ),
-            None => format!(
-                "No repository loaded  •  {}",
-                widgets::mode_label(self.view)
-            ),
-        };
+        let mut spans = Vec::new();
 
-        Paragraph::new(text)
-            .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+        match &self.status {
+            Some(status) => {
+                spans.push(Span::styled(
+                    status.branch_name.clone(),
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw("  •  "));
+                spans.push(Span::styled(
+                    format!("{} file(s) changed", status.files.len()),
+                    Style::default().fg(theme::MUTED),
+                ));
+            }
+            None => {
+                spans.push(Span::styled(
+                    "No repository loaded",
+                    Style::default()
+                        .fg(theme::MUTED)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
+
+        spans.push(Span::raw("  •  "));
+
+        match self.view {
+            View::Branches => {
+                let local_active = matches!(self.branch_panel, BranchPanel::Local);
+                let remote_active = matches!(self.branch_panel, BranchPanel::Remote);
+                spans.push(Span::styled(
+                    "branches / ",
+                    Style::default().fg(theme::MUTED),
+                ));
+                spans.push(Span::styled(
+                    "local",
+                    Style::default()
+                        .fg(if local_active {
+                            theme::ACCENT
+                        } else {
+                            theme::MUTED
+                        })
+                        .add_modifier(if local_active {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ));
+                spans.push(Span::raw("  •  "));
+                spans.push(Span::styled(
+                    "branches / ",
+                    Style::default().fg(theme::MUTED),
+                ));
+                spans.push(Span::styled(
+                    "remote",
+                    Style::default()
+                        .fg(if remote_active {
+                            theme::PURPLE
+                        } else {
+                            theme::MUTED
+                        })
+                        .add_modifier(if remote_active {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ));
+            }
+            _ => {
+                spans.push(Span::styled(
+                    widgets::mode_label(self.view),
+                    Style::default().fg(theme::MUTED),
+                ));
+            }
+        }
+
+        Paragraph::new(Line::from(spans))
+            .style(theme::panel_surface_style(true, theme::SURFACE))
             .block(
                 Block::default()
                     .title("gitrex")
-                    .title_style(
-                        Style::default()
-                            .fg(theme::ACCENT)
-                            .add_modifier(Modifier::BOLD),
-                    )
+                    .title_style(theme::panel_title_style(true, theme::ACCENT))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::ACCENT)),
+                    .border_style(theme::panel_border_style(true, theme::ACCENT)),
             )
     }
 
     fn render_status(&self) -> Paragraph<'_> {
+        let active = matches!(self.view, View::Status);
+        let accent = theme::WARNING;
         let text = self
             .status
             .as_ref()
@@ -801,17 +889,19 @@ impl App {
             .unwrap_or_else(|| "no repository loaded".to_string());
 
         Paragraph::new(text)
-            .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+            .style(theme::panel_surface_style(active, theme::SURFACE))
             .block(
                 Block::default()
                     .title("Status")
-                    .title_style(Style::default().fg(theme::WARNING))
+                    .title_style(theme::panel_title_style(active, accent))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::WARNING)),
+                    .border_style(theme::panel_border_style(active, accent)),
             )
     }
 
     fn render_branch_search(&self) -> Paragraph<'_> {
+        let active = self.branch_search_open;
+        let accent = theme::ACCENT;
         let text = if self.branch_search_open {
             format!(
                 "Search branches: {}_\nEnter = apply • Esc = cancel",
@@ -827,17 +917,21 @@ impl App {
         };
 
         Paragraph::new(text)
-            .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT))
+            .style(theme::panel_surface_style(active, theme::SURFACE_ALT))
             .block(
                 Block::default()
                     .title("Branch Search")
-                    .title_style(Style::default().fg(theme::MUTED))
+                    .title_style(theme::panel_title_style(active, accent))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::MUTED)),
+                    .border_style(theme::panel_border_style(active, accent)),
             )
     }
 
     fn render_remote_branches(&self) -> List<'_> {
+        let active = matches!(self.branch_panel, BranchPanel::Remote);
+        let title_color = theme::PURPLE;
+        let border_color = theme::PURPLE;
+        let item_style = theme::panel_item_style(active);
         let branches = self.remote_branches();
         let total = branches.len();
         let selected = self
@@ -860,10 +954,10 @@ impl App {
                 );
                 let style = if branch.current {
                     Style::default()
-                        .fg(theme::SUCCESS)
+                        .fg(if active { theme::SUCCESS } else { theme::MUTED })
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    item_style
                 };
 
                 ListItem::new(text).style(style)
@@ -878,12 +972,7 @@ impl App {
         };
 
         List::new(items)
-            .highlight_style(
-                Style::default()
-                    .fg(theme::BG)
-                    .bg(theme::PURPLE)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(theme::panel_highlight_style(active, theme::PURPLE))
             .highlight_symbol("▶ ")
             .block(
                 Block::default()
@@ -892,13 +981,17 @@ impl App {
                         selected.saturating_add(1),
                         total.max(1)
                     ))
-                    .title_style(Style::default().fg(theme::PURPLE))
+                    .title_style(theme::panel_title_style(active, title_color))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::PURPLE)),
+                    .border_style(theme::panel_border_style(active, border_color)),
             )
     }
 
     fn render_local_branches(&self) -> List<'_> {
+        let active = matches!(self.branch_panel, BranchPanel::Local);
+        let title_color = theme::ACCENT;
+        let border_color = theme::ACCENT;
+        let item_style = theme::panel_item_style(active);
         let local_branches = self.local_branches();
         let catalog = build_branch_catalog(&self.branches);
         let total = local_branches.len();
@@ -929,10 +1022,10 @@ impl App {
                 let text = format!("{marker} {}{sync_label}", branch.name);
                 let style = if branch.current {
                     Style::default()
-                        .fg(theme::SUCCESS)
+                        .fg(if active { theme::SUCCESS } else { theme::MUTED })
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(theme::TEXT)
+                    item_style
                 };
 
                 ListItem::new(text).style(style)
@@ -945,12 +1038,7 @@ impl App {
         };
 
         List::new(items)
-            .highlight_style(
-                Style::default()
-                    .fg(theme::BG)
-                    .bg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(theme::panel_highlight_style(active, theme::ACCENT))
             .highlight_symbol("▶ ")
             .block(
                 Block::default()
@@ -959,13 +1047,17 @@ impl App {
                         selected.saturating_add(1),
                         total.max(1)
                     ))
-                    .title_style(Style::default().fg(theme::ACCENT))
+                    .title_style(theme::panel_title_style(active, title_color))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::ACCENT)),
+                    .border_style(theme::panel_border_style(active, border_color)),
             )
     }
 
     fn render_graph(&self, width: u16) -> List<'_> {
+        let active = matches!(self.view, View::Log);
+        let title_color = theme::PURPLE;
+        let border_color = theme::PURPLE;
+        let item_style = theme::panel_highlight_style(active, theme::PURPLE);
         let items = output::render_graph_rows(
             &self.graph,
             self.selected_commit,
@@ -981,16 +1073,11 @@ impl App {
             .block(
                 Block::default()
                     .title(title)
-                    .title_style(Style::default().fg(theme::PURPLE))
+                    .title_style(theme::panel_title_style(active, title_color))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::PURPLE)),
+                    .border_style(theme::panel_border_style(active, border_color)),
             )
-            .highlight_style(
-                Style::default()
-                    .fg(theme::BG)
-                    .bg(theme::PURPLE)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(item_style)
             .highlight_symbol("▶ ")
     }
 
@@ -1016,6 +1103,9 @@ impl App {
     }
 
     fn render_actions(&self) -> Paragraph<'_> {
+        let active = matches!(self.view, View::Log);
+        let title_color = theme::SUCCESS;
+        let border_color = theme::SUCCESS;
         let copy = if matches!(self.view, View::Log) {
             let commit = self.selected_commit().map(|commit| {
                 let short_hash = commit.hash.chars().take(8).collect::<String>();
@@ -1052,13 +1142,13 @@ impl App {
         };
 
         Paragraph::new(copy)
-            .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE_ALT))
+            .style(theme::panel_surface_style(active, theme::SURFACE_ALT))
             .block(
                 Block::default()
                     .title("Actions")
-                    .title_style(Style::default().fg(theme::SUCCESS))
+                    .title_style(theme::panel_title_style(active, title_color))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::SUCCESS)),
+                    .border_style(theme::panel_border_style(active, border_color)),
             )
     }
 
@@ -1084,6 +1174,8 @@ impl App {
     }
 
     fn render_picker(&self) -> Paragraph<'_> {
+        let active = matches!(self.branch_panel, BranchPanel::Local);
+        let border_color = theme::ACCENT;
         let branch = self
             .selected_branch()
             .map(|branch| branch.name.as_str())
@@ -1109,17 +1201,19 @@ impl App {
         Paragraph::new(format!(
             "Branch: {branch}\nSync target: {sync_target}\n\n{options}\n\nEnter = confirm • Esc = close"
         ))
-            .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
-            .block(
-                Block::default()
-                    .title("Branch Actions")
-                    .title_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::ACCENT)),
-            )
+        .style(theme::panel_surface_style(active, theme::SURFACE))
+        .block(
+            Block::default()
+                .title("Branch Actions")
+                .title_style(theme::panel_title_style(active, border_color))
+                .borders(Borders::ALL)
+                .border_style(theme::panel_border_style(active, border_color)),
+        )
     }
 
     fn render_remote_picker(&self) -> Paragraph<'_> {
+        let active = matches!(self.branch_panel, BranchPanel::Remote);
+        let border_color = theme::PURPLE;
         let branch = self
             .selected_remote_branch()
             .map(|branch| branch.display_name())
@@ -1142,17 +1236,13 @@ impl App {
         Paragraph::new(format!(
             "Remote branch: {branch}\n\n{options}\n\nEnter = confirm • Esc = close"
         ))
-        .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+        .style(theme::panel_surface_style(active, theme::SURFACE))
         .block(
             Block::default()
                 .title("Remote Branch Actions")
-                .title_style(
-                    Style::default()
-                        .fg(theme::PURPLE)
-                        .add_modifier(Modifier::BOLD),
-                )
+                .title_style(theme::panel_title_style(active, border_color))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::PURPLE)),
+                .border_style(theme::panel_border_style(active, border_color)),
         )
     }
 
@@ -1167,13 +1257,13 @@ impl App {
         Paragraph::new(format!(
             "Source branch: {source}\nNew branch name: {name}\n\nEnter = create • Esc = cancel • Backspace = delete"
         ))
-        .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+        .style(theme::panel_surface_style(true, theme::SURFACE))
         .block(
             Block::default()
                 .title("Create Branch")
-                .title_style(Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))
+                .title_style(theme::panel_title_style(true, self.branch_create_accent))
                 .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::ACCENT)),
+                .border_style(theme::panel_border_style(true, self.branch_create_accent)),
         )
     }
 
@@ -1203,17 +1293,13 @@ impl App {
         Paragraph::new(format!(
             "Commit: {commit}\n\n{options}\n\nEnter = confirm • Esc = close"
         ))
-        .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+        .style(theme::panel_surface_style(true, theme::SURFACE))
         .block(
             Block::default()
                 .title("Commit Actions")
-                .title_style(
-                    Style::default()
-                        .fg(theme::PURPLE)
-                        .add_modifier(Modifier::BOLD),
-                )
+                .title_style(theme::panel_title_style(true, theme::PURPLE))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::PURPLE)),
+                .border_style(theme::panel_border_style(true, theme::PURPLE)),
         )
     }
 
@@ -1252,7 +1338,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, BranchPanel, CommitAction, MessageKind, PickerAction, View};
+    use super::{theme, App, BranchPanel, CommitAction, MessageKind, PickerAction, View};
     use crate::domain::{BranchInfo, BranchKind, RepoStatus};
 
     #[test]
@@ -1344,6 +1430,59 @@ mod tests {
             app.selected_remote_branch().unwrap().full_ref(),
             "refs/remotes/origin/feature/login"
         );
+    }
+
+    #[test]
+    fn switching_branch_panels_materializes_visible_selection() {
+        let mut app = App::new();
+        app.branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: Some("origin/main".to_string()),
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "feature/login".to_string(),
+                current: false,
+                upstream: None,
+                commit: "def".to_string(),
+                subject: "feature".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Remote,
+            },
+            BranchInfo {
+                name: "upstream/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+
+        app.set_branch_panel(BranchPanel::Remote);
+        assert_eq!(
+            app.selected_remote_branch().unwrap().full_ref(),
+            "refs/remotes/origin/main"
+        );
+        app.open_remote_picker();
+        assert!(app.remote_picker_is_open());
+        app.close_remote_picker();
+
+        app.set_branch_panel(BranchPanel::Local);
+        assert_eq!(app.selected_branch().unwrap().name, "main");
+        app.open_picker();
+        assert!(app.picker_open);
     }
 
     #[test]
@@ -1534,5 +1673,15 @@ mod tests {
                 "refs/remotes/origin/main".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn branch_creator_tracks_the_origin_accent() {
+        let mut app = App::new();
+
+        app.open_branch_creator_from_source("refs/remotes/origin/main".to_string(), theme::PURPLE);
+
+        assert!(app.branch_create_is_open());
+        assert_eq!(app.branch_create_accent, theme::PURPLE);
     }
 }
