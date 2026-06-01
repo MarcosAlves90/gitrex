@@ -7,8 +7,14 @@ pub use args::{Cli, Commands};
 
 pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<()> {
     match command {
-        Some(Commands::Status) => output::print_status(&client.status()?),
-        Some(Commands::Branch) => output::print_branches(&client.branches()?),
+        Some(Commands::Status) => {
+            client.refresh_remote_refs()?;
+            output::print_status(&client.status()?)
+        }
+        Some(Commands::Branch) => {
+            client.refresh_remote_refs()?;
+            output::print_branches(&client.branches()?)
+        }
         Some(Commands::Log { limit }) => output::print_log(&client.log(limit)?),
         Some(Commands::Checkout { target }) => {
             client.checkout(&target)?;

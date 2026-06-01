@@ -1,16 +1,15 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
-pub fn dashboard(area: Rect) -> [Rect; 4] {
+pub fn dashboard(area: Rect) -> [Rect; 3] {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),
             Constraint::Min(12),
-            Constraint::Length(7),
             Constraint::Length(3),
         ])
         .split(area);
-    [rows[0], rows[1], rows[2], rows[3]]
+    [rows[0], rows[1], rows[2]]
 }
 
 pub fn body(area: Rect) -> [Rect; 2] {
@@ -39,6 +38,19 @@ pub fn branch_sections(area: Rect) -> [Rect; 3] {
         ])
         .split(area);
     [rows[0], rows[1], rows[2]]
+}
+
+pub fn loading_splash(area: Rect) -> [Rect; 2] {
+    let area = centered_rect(84, 36, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(9),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+    [rows[0], rows[2]]
 }
 
 pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

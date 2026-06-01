@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use git2::{
-    build::CheckoutBuilder, BranchType, ErrorCode, ObjectType, Oid, PushOptions, RemoteCallbacks,
-    Repository,
+    build::CheckoutBuilder, BranchType, Cred, CredentialType, ErrorCode, FetchOptions, FetchPrune,
+    ObjectType, Oid, PushOptions, RemoteCallbacks, Repository,
 };
 
 use crate::domain::error::{GitError, Result};
@@ -23,6 +23,23 @@ impl GitClient {
         crate::git::status::read_status(self)
     }
 
+    pub fn refresh_remote_refs(&self) -> Result<()> {
+        let repo = self.repo()?;
+        let remotes = repo.remotes().map_err(map_git_error)?;
+
+        for remote_name in remotes.iter().flatten() {
+            let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
+            let mut options = FetchOptions::new();
+            options.prune(FetchPrune::On);
+            options.remote_callbacks(remote_callbacks(&repo)?);
+            remote
+                .fetch(&[] as &[&str], Some(&mut options), None)
+                .map_err(map_git_error)?;
+        }
+
+        Ok(())
+    }
+
     pub fn branches(&self) -> Result<Vec<crate::domain::BranchInfo>> {
         crate::git::branch::list_branches(self)
     }
@@ -33,6 +50,10 @@ impl GitClient {
 
     pub fn history_for_ref(&self, reference: &str) -> Result<crate::domain::BranchHistory> {
         crate::git::read_branch_history(self, reference)
+    }
+
+    pub fn snapshot(&self) -> Result<crate::domain::RepoSnapshot> {
+        crate::git::read_snapshot(self)
     }
 
     pub fn checkout(&self, target: &str) -> Result<()> {
@@ -90,6 +111,28 @@ impl GitClient {
         self.switch(branch)
     }
 
+    pub fn delete_local_branch(&self, branch: &str) -> Result<()> {
+        let repo = self.repo()?;
+        let mut branch = repo
+            .find_branch(branch, BranchType::Local)
+            .map_err(map_git_error)?;
+        branch.delete().map_err(map_git_error)?;
+        Ok(())
+    }
+
+    pub fn delete_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
+        let repo = self.repo()?;
+        let mut remote = repo.find_remote(remote).map_err(map_git_error)?;
+
+        let mut options = PushOptions::new();
+        options.remote_callbacks(remote_callbacks(&repo)?);
+        let refspec = format!(":refs/heads/{branch}");
+        remote
+            .push(&[refspec.as_str()], Some(&mut options))
+            .map_err(map_git_error)?;
+        Ok(())
+    }
+
     pub fn clone(&self, repository: &str, directory: Option<&Path>) -> Result<()> {
         let path = match directory {
             Some(path) => path.to_path_buf(),
@@ -112,8 +155,10 @@ impl GitClient {
         let remote_name = remote.unwrap_or("origin");
 
         let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
+        let mut options = FetchOptions::new();
+        options.remote_callbacks(remote_callbacks(&repo)?);
         remote
-            .fetch(&[branch_name.as_str()], None, None)
+            .fetch(&[branch_name.as_str()], Some(&mut options), None)
             .map_err(map_git_error)?;
 
         let remote_ref_name = format!("refs/remotes/{remote_name}/{branch_name}");
@@ -159,8 +204,7 @@ impl GitClient {
         let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
 
         let mut options = PushOptions::new();
-        let callbacks = RemoteCallbacks::new();
-        options.remote_callbacks(callbacks);
+        options.remote_callbacks(remote_callbacks(&repo)?);
         remote
             .push(
                 &[format!("refs/heads/{branch_name}:refs/heads/{branch_name}")],
@@ -169,6 +213,53 @@ impl GitClient {
             .map_err(map_git_error)?;
         Ok(())
     }
+}
+
+fn remote_callbacks(repo: &Repository) -> Result<RemoteCallbacks<'static>> {
+    let config = repo.config().map_err(map_git_error)?;
+    let mut callbacks = RemoteCallbacks::new();
+    callbacks.credentials(move |url, username_from_url, allowed_types| {
+        resolve_credentials(&config, url, username_from_url, allowed_types)
+    });
+    Ok(callbacks)
+}
+
+fn resolve_credentials(
+    config: &git2::Config,
+    url: &str,
+    username_from_url: Option<&str>,
+    allowed_types: CredentialType,
+) -> std::result::Result<Cred, git2::Error> {
+    let username = username_from_url.unwrap_or("git");
+
+    if allowed_types.is_ssh_key() || url.starts_with("ssh://") || url.starts_with("git@") {
+        if let Ok(cred) = Cred::ssh_key_from_agent(username) {
+            return Ok(cred);
+        }
+    }
+
+    if allowed_types.is_user_pass_plaintext()
+        || allowed_types.is_username()
+        || allowed_types.is_default()
+    {
+        if let Ok(cred) = Cred::credential_helper(config, url, username_from_url) {
+            return Ok(cred);
+        }
+    }
+
+    if allowed_types.is_username() {
+        if let Ok(cred) = Cred::username(username) {
+            return Ok(cred);
+        }
+    }
+
+    if allowed_types.is_default() {
+        return Cred::default();
+    }
+
+    Err(git2::Error::from_str(
+        "unable to resolve local git credentials",
+    ))
 }
 
 fn resolve_commit_oid(repo: &Repository, reference: &str) -> Result<Oid> {
@@ -199,4 +290,75 @@ fn map_repo_error(error: git2::Error) -> GitError {
 
 fn map_git_error(error: git2::Error) -> GitError {
     map_repo_error(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GitClient;
+    use crate::test_support::{
+        checkout_branch, clone_bare_repo, clone_repo, commit_all, configure_user, create_branch,
+        current_dir_lock, init_repo, push_branch, set_remote_head, set_upstream, write_file,
+        CurrentDirGuard,
+    };
+
+    #[test]
+    fn delete_local_branch_removes_ref_from_repository() {
+        let _guard = current_dir_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        commit_all(&repo, "initial commit");
+        create_branch(&repo, "feature/login", "HEAD");
+        let _restore = CurrentDirGuard::push(temp.path());
+
+        let client = GitClient::new();
+        client.delete_local_branch("feature/login").unwrap();
+
+        assert!(repo
+            .find_branch("feature/login", git2::BranchType::Local)
+            .is_err());
+    }
+
+    #[test]
+    fn delete_remote_branch_pushes_refspec_to_remote() {
+        let _guard = current_dir_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let seed = temp.path().join("seed");
+        let origin = temp.path().join("origin.git");
+        let worktree = temp.path().join("worktree");
+
+        let seed_repo = init_repo(&seed, "main");
+        configure_user(&seed_repo);
+        write_file(&seed, "README.md", "base\n");
+        commit_all(&seed_repo, "initial commit");
+
+        let origin_repo = clone_bare_repo(&seed, &origin);
+        set_remote_head(&origin_repo, "refs/heads/main");
+
+        let worktree_repo = clone_repo(&origin, &worktree);
+        configure_user(&worktree_repo);
+        set_upstream(&worktree_repo, "main", "origin/main");
+
+        write_file(&worktree, "feature.txt", "feature\n");
+        commit_all(&worktree_repo, "feature work");
+        create_branch(&worktree_repo, "feature/login", "HEAD");
+        checkout_branch(&worktree_repo, "feature/login");
+        push_branch(&worktree_repo, "origin", "feature/login");
+
+        let _restore = CurrentDirGuard::push(&worktree);
+        let client = GitClient::new();
+        client
+            .delete_remote_branch("origin", "feature/login")
+            .unwrap();
+
+        let origin_repo = git2::Repository::open_bare(&origin).unwrap();
+        assert!(origin_repo
+            .find_reference("refs/heads/feature/login")
+            .is_err());
+    }
 }

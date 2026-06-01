@@ -1,14 +1,14 @@
-use chrono::{TimeZone, Utc};
-use git2::{Oid, Repository, Sort};
+use git2::{Oid, Repository};
 
 use crate::domain::{CommitSummary, GraphLine};
 
 use super::GitClient;
+use super::shared::{collect_history_commits, map_error};
 
 pub fn read_log(client: &GitClient, limit: usize) -> crate::domain::Result<Vec<CommitSummary>> {
     let repo = client.repo()?;
     let start = head_oid(&repo)?;
-    let commits = collect_commits(&repo, start, Some(limit))?;
+    let commits = collect_history_commits(&repo, start, Some(limit))?;
     Ok(commits.into_iter().map(|commit| commit.summary).collect())
 }
 
@@ -18,63 +18,6 @@ fn head_oid(repo: &Repository) -> crate::domain::Result<Oid> {
         .peel_to_commit()
         .map_err(map_error)
         .map(|commit| commit.id())
-}
-
-fn collect_commits(
-    repo: &Repository,
-    start: Oid,
-    limit: Option<usize>,
-) -> crate::domain::Result<Vec<HistoryCommit>> {
-    let mut revwalk = repo.revwalk().map_err(map_error)?;
-    revwalk.push(start).map_err(map_error)?;
-    revwalk
-        .set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
-        .map_err(map_error)?;
-
-    let mut commits = Vec::new();
-    for oid in revwalk.take(limit.unwrap_or(usize::MAX)) {
-        let oid = oid.map_err(map_error)?;
-        let commit = repo.find_commit(oid).map_err(map_error)?;
-        commits.push(HistoryCommit::from_commit(&commit));
-    }
-    Ok(commits)
-}
-
-#[derive(Debug, Clone)]
-struct HistoryCommit {
-    summary: CommitSummary,
-}
-
-impl HistoryCommit {
-    fn from_commit(commit: &git2::Commit<'_>) -> Self {
-        Self {
-            summary: CommitSummary {
-                hash: short_oid(commit.id()),
-                author: commit.author().name().unwrap_or("unknown").to_string(),
-                date: short_date(commit.time().seconds()),
-                subject: commit.summary().unwrap_or_default().to_string(),
-            },
-        }
-    }
-}
-
-fn short_oid(oid: Oid) -> String {
-    oid.to_string().chars().take(8).collect()
-}
-
-fn short_date(seconds: i64) -> String {
-    Utc.timestamp_opt(seconds, 0)
-        .single()
-        .map(|date| date.format("%Y-%m-%d").to_string())
-        .unwrap_or_else(|| seconds.to_string())
-}
-
-fn map_error(error: git2::Error) -> crate::domain::GitError {
-    if error.code() == git2::ErrorCode::NotFound {
-        crate::domain::GitError::NotRepository
-    } else {
-        crate::domain::GitError::Backend(error.message().to_string())
-    }
 }
 
 pub fn parse_log_lines(output: &str) -> Vec<CommitSummary> {

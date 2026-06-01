@@ -3,6 +3,7 @@ use git2::{Repository, Status, StatusOptions};
 use crate::domain::{RepoStatus, StatusEntry};
 
 use super::GitClient;
+use super::shared::map_error;
 
 pub fn read_status(client: &GitClient) -> crate::domain::Result<RepoStatus> {
     let repo = client.repo()?;
@@ -175,14 +176,6 @@ fn parse_status_entry(line: &str) -> Option<StatusEntry> {
     let code = trimmed.get(0..2)?.to_string();
     let path = trimmed.get(3..)?.to_string();
     Some(StatusEntry { code, path })
-}
-
-fn map_error(error: git2::Error) -> crate::domain::GitError {
-    if error.code() == git2::ErrorCode::NotFound {
-        crate::domain::GitError::NotRepository
-    } else {
-        crate::domain::GitError::Backend(error.message().to_string())
-    }
 }
 
 #[cfg(test)]

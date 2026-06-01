@@ -3,6 +3,7 @@ use git2::{BranchType, Repository};
 use crate::domain::{BranchInfo, BranchKind};
 
 use super::GitClient;
+use super::shared::{map_error, short_oid};
 
 pub fn list_branches(client: &GitClient) -> crate::domain::Result<Vec<BranchInfo>> {
     let repo = client.repo()?;
@@ -100,18 +101,6 @@ fn collect_branches(
     }
 
     Ok(())
-}
-
-fn short_oid(oid: git2::Oid) -> String {
-    oid.to_string().chars().take(8).collect()
-}
-
-fn map_error(error: git2::Error) -> crate::domain::GitError {
-    if error.code() == git2::ErrorCode::NotFound {
-        crate::domain::GitError::NotRepository
-    } else {
-        crate::domain::GitError::Backend(error.message().to_string())
-    }
 }
 
 #[cfg(test)]

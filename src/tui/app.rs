@@ -1,22 +1,27 @@
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 
 use crate::{
     cli::output,
     domain::{
-        build_branch_catalog, BranchHistory, BranchInfo, CommitSummary, GraphLine, RepoStatus,
+        build_branch_catalog, BranchHistory, BranchInfo, CommitSummary, GraphLine, RepoSnapshot,
+        RepoStatus,
     },
 };
 
-use super::{layout, theme, widgets};
+use super::{branching, layout, theme, widgets};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Status,
     Branches,
     Log,
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,12 +61,20 @@ pub enum PickerAction {
     Pull,
     Push,
     CreateBranch,
+    DeleteBranch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteBranchAction {
     CreateLocalBranch,
     CheckoutDetached,
+    DeleteRemoteBranch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteBranchTarget {
+    Local { branch: String },
+    Remote { remote: String, branch: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +100,7 @@ impl PickerAction {
             PickerAction::Pull => "pull current branch",
             PickerAction::Push => "push current branch",
             PickerAction::CreateBranch => "create branch from source",
+            PickerAction::DeleteBranch => "delete branch",
         }
     }
 }
@@ -96,6 +110,16 @@ impl RemoteBranchAction {
         match self {
             RemoteBranchAction::CreateLocalBranch => "create local branch",
             RemoteBranchAction::CheckoutDetached => "checkout detached HEAD",
+            RemoteBranchAction::DeleteRemoteBranch => "delete remote branch",
+        }
+    }
+}
+
+impl DeleteBranchTarget {
+    pub fn display_name(&self) -> String {
+        match self {
+            DeleteBranchTarget::Local { branch } => branch.clone(),
+            DeleteBranchTarget::Remote { remote, branch } => format!("{remote}/{branch}"),
         }
     }
 }
@@ -116,6 +140,8 @@ pub struct App {
     pub(crate) remote_picker_index: usize,
     pub(crate) commit_actions_open: bool,
     pub(crate) commit_action_index: usize,
+    pub(crate) delete_branch_confirm_open: bool,
+    pub(crate) delete_branch_target: Option<DeleteBranchTarget>,
     pub(crate) graph_scroll_offset: usize,
     pub(crate) branch_filter: String,
     pub(crate) branch_search_open: bool,
@@ -124,7 +150,10 @@ pub struct App {
     pub(crate) branch_create_source: Option<String>,
     pub(crate) branch_create_accent: ratatui::style::Color,
     pub(crate) branch_create_name: String,
+    pub(crate) help_return_view: Option<View>,
+    pub(crate) help_scroll_offset: usize,
     pub(crate) loading: Option<String>,
+    pub(crate) loading_frame: usize,
     pub(crate) message: String,
     pub(crate) message_kind: MessageKind,
 }
@@ -147,6 +176,8 @@ impl App {
             remote_picker_index: 0,
             commit_actions_open: false,
             commit_action_index: 0,
+            delete_branch_confirm_open: false,
+            delete_branch_target: None,
             graph_scroll_offset: 0,
             branch_filter: String::new(),
             branch_search_open: false,
@@ -155,8 +186,13 @@ impl App {
             branch_create_source: None,
             branch_create_accent: theme::ACCENT,
             branch_create_name: String::new(),
+            help_return_view: None,
+            help_scroll_offset: 0,
             loading: None,
-            message: String::from("Press q to quit, r to refresh, Enter for branch actions."),
+            loading_frame: 0,
+            message: String::from(
+                "Press h for help, q to quit, r to refresh, Enter for branch actions.",
+            ),
             message_kind: MessageKind::Info,
         }
     }
@@ -167,7 +203,34 @@ impl App {
     }
 
     pub fn select_view(&mut self, view: View) {
+        let was_help_open = self.help_is_open();
         self.view = view;
+        if was_help_open {
+            self.help_return_view = Some(view);
+        }
+        if matches!(self.view, View::Branches) {
+            self.ensure_active_branch_selection_visible();
+        }
+    }
+
+    pub fn help_is_open(&self) -> bool {
+        matches!(self.view, View::Help)
+    }
+
+    pub fn open_help(&mut self) {
+        if self.help_is_open() {
+            return;
+        }
+        self.help_return_view = Some(self.view);
+        self.help_scroll_offset = 0;
+        self.view = View::Help;
+        self.set_feedback("Press h or Esc to close help.", MessageKind::Info);
+    }
+
+    pub fn close_help(&mut self) {
+        let previous = self.help_return_view.take().unwrap_or(View::Branches);
+        self.help_scroll_offset = 0;
+        self.view = previous;
         if matches!(self.view, View::Branches) {
             self.ensure_active_branch_selection_visible();
         }
@@ -267,6 +330,7 @@ impl App {
             PickerAction::Pull,
             PickerAction::Push,
             PickerAction::CreateBranch,
+            PickerAction::DeleteBranch,
         ];
         ACTIONS
     }
@@ -283,59 +347,35 @@ impl App {
         self.commit_actions_open
     }
 
+    pub fn delete_branch_confirm_is_open(&self) -> bool {
+        self.delete_branch_confirm_open
+    }
+
+    pub fn delete_branch_target(&self) -> Option<DeleteBranchTarget> {
+        self.delete_branch_target.clone()
+    }
+
     pub fn sync_target_display(&self) -> Option<String> {
         self.current_sync_target()
             .map(|(remote, branch)| format!("{remote}/{branch}"))
     }
 
     pub fn selected_graph_ref(&self) -> Option<String> {
-        match self.branch_panel {
-            BranchPanel::Local => self
-                .selected_branch()
-                .map(|branch| branch.name.clone())
-                .or_else(|| {
-                    self.status
-                        .as_ref()
-                        .map(|status| status.branch_name.clone())
-                }),
-            BranchPanel::Remote => self
-                .selected_remote_branch()
-                .map(|branch| branch.full_ref())
-                .or_else(|| {
-                    self.selected_branch()
-                        .map(|branch| branch.name.clone())
-                        .or_else(|| {
-                            self.status
-                                .as_ref()
-                                .map(|status| status.branch_name.clone())
-                        })
-                }),
-        }
+        branching::selected_graph_ref(
+            self.branch_panel,
+            self.selected_branch(),
+            self.selected_remote_branch(),
+            self.status.as_ref().map(|status| status.branch_name.as_str()),
+        )
     }
 
     pub fn selected_graph_label(&self) -> Option<String> {
-        match self.branch_panel {
-            BranchPanel::Local => self
-                .selected_branch()
-                .map(|branch| branch.name.clone())
-                .or_else(|| {
-                    self.status
-                        .as_ref()
-                        .map(|status| status.branch_name.clone())
-                }),
-            BranchPanel::Remote => self
-                .selected_remote_branch()
-                .map(|branch| branch.display_name())
-                .or_else(|| {
-                    self.selected_branch()
-                        .map(|branch| branch.name.clone())
-                        .or_else(|| {
-                            self.status
-                                .as_ref()
-                                .map(|status| status.branch_name.clone())
-                        })
-                }),
-        }
+        branching::selected_graph_label(
+            self.branch_panel,
+            self.selected_branch(),
+            self.selected_remote_branch(),
+            self.status.as_ref().map(|status| status.branch_name.as_str()),
+        )
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -414,6 +454,14 @@ impl App {
         self.selected_commit = next.min(commit_count.saturating_sub(1));
     }
 
+    pub fn move_help_scroll(&mut self, delta: isize) {
+        if delta.is_negative() {
+            self.help_scroll_offset = self.help_scroll_offset.saturating_sub(delta.unsigned_abs());
+        } else {
+            self.help_scroll_offset = self.help_scroll_offset.saturating_add(delta as usize);
+        }
+    }
+
     pub fn advance_graph_scroll(&mut self) {
         if self.log.is_empty() {
             self.graph_scroll_offset = 0;
@@ -471,6 +519,20 @@ impl App {
         self.commit_actions_open = false;
     }
 
+    pub fn open_delete_branch_confirm(&mut self, target: DeleteBranchTarget) {
+        self.delete_branch_confirm_open = true;
+        self.delete_branch_target = Some(target);
+        self.set_feedback(
+            "Delete confirmation is extra dangerous. Enter = confirm, Esc = cancel.",
+            MessageKind::Warning,
+        );
+    }
+
+    pub fn close_delete_branch_confirm(&mut self) {
+        self.delete_branch_confirm_open = false;
+        self.delete_branch_target = None;
+    }
+
     pub fn open_branch_creator(&mut self) {
         self.ensure_active_branch_selection_visible();
         let Some(source) = self.selected_branch().map(|branch| branch.name.clone()) else {
@@ -524,105 +586,28 @@ impl App {
         self.log.get(self.selected_commit)
     }
 
-    fn branch_filter_matches(&self, branch: &BranchInfo) -> bool {
-        let query = self.branch_filter.trim();
-        if query.is_empty() {
-            return true;
-        }
-
-        let query = query.to_ascii_lowercase();
-        let display_name = branch.display_name().to_ascii_lowercase();
-        [
-            branch.name.to_ascii_lowercase(),
-            branch.commit.to_ascii_lowercase(),
-            branch.subject.to_ascii_lowercase(),
-            branch
-                .upstream
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase(),
-            display_name,
-        ]
-        .iter()
-        .any(|haystack| haystack.contains(&query))
-    }
-
     fn filtered_remote_branches(&self) -> Vec<&BranchInfo> {
-        let mut branches = self
-            .branches
-            .iter()
-            .filter(|branch| matches!(branch.kind, crate::domain::BranchKind::Remote))
-            .filter(|branch| self.branch_filter_matches(branch))
-            .collect::<Vec<_>>();
-        branches.sort_by(|left, right| {
-            left.remote_name()
-                .cmp(&right.remote_name())
-                .then_with(|| left.branch_short_name().cmp(right.branch_short_name()))
-                .then_with(|| right.commit.cmp(&left.commit))
-        });
-        branches
+        branching::filtered_remote_branches(self.branches.as_slice(), self.branch_filter.as_str())
     }
 
     fn filtered_local_branches(&self) -> Vec<&BranchInfo> {
-        let mut branches = self
-            .branches
-            .iter()
-            .filter(|branch| matches!(branch.kind, crate::domain::BranchKind::Local))
-            .filter(|branch| self.branch_filter_matches(branch))
-            .collect::<Vec<_>>();
-        branches.sort_by(|left, right| {
-            right
-                .current
-                .cmp(&left.current)
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        branches
+        branching::filtered_local_branches(self.branches.as_slice(), self.branch_filter.as_str())
     }
 
     fn ensure_selected_local_branch_visible(&mut self) -> bool {
-        let local_branches = self.filtered_local_branches();
-        if local_branches.is_empty() {
-            let changed = self.selected_branch.is_some();
-            self.selected_branch = None;
-            return changed;
-        }
-
-        let selected_visible = self.selected_branch.as_deref().and_then(|selected| {
-            local_branches
-                .iter()
-                .position(|branch| branch.name == selected)
-        });
-        if selected_visible.is_some() {
-            return false;
-        }
-
-        let selected = local_branches[0].name.clone();
-        let changed = self.selected_branch.as_deref() != Some(selected.as_str());
-        self.selected_branch = Some(selected);
-        changed
+        branching::ensure_selected_local_branch_visible(
+            self.branches.as_slice(),
+            self.branch_filter.as_str(),
+            &mut self.selected_branch,
+        )
     }
 
     fn ensure_selected_remote_branch_visible(&mut self) -> bool {
-        let remote_branches = self.filtered_remote_branches();
-        if remote_branches.is_empty() {
-            let changed = self.selected_remote_branch.is_some();
-            self.selected_remote_branch = None;
-            return changed;
-        }
-
-        let selected_visible = self.selected_remote_branch.as_deref().and_then(|selected| {
-            remote_branches
-                .iter()
-                .position(|branch| branch.full_ref() == selected)
-        });
-        if selected_visible.is_some() {
-            return false;
-        }
-
-        let selected = remote_branches[0].full_ref();
-        let changed = self.selected_remote_branch.as_deref() != Some(selected.as_str());
-        self.selected_remote_branch = Some(selected);
-        changed
+        branching::ensure_selected_remote_branch_visible(
+            self.branches.as_slice(),
+            self.branch_filter.as_str(),
+            &mut self.selected_remote_branch,
+        )
     }
 
     fn ensure_active_branch_selection_visible(&mut self) {
@@ -677,6 +662,7 @@ impl App {
         const ACTIONS: &[RemoteBranchAction] = &[
             RemoteBranchAction::CreateLocalBranch,
             RemoteBranchAction::CheckoutDetached,
+            RemoteBranchAction::DeleteRemoteBranch,
         ];
         ACTIONS
     }
@@ -705,32 +691,31 @@ impl App {
     pub fn start_loading(&mut self, label: impl Into<String>) {
         let label = label.into();
         self.loading = Some(label.clone());
+        self.loading_frame = 0;
         self.set_feedback(format!("{label}..."), MessageKind::Info);
     }
 
     pub fn stop_loading(&mut self) {
         self.loading = None;
+        self.loading_frame = 0;
+    }
+
+    pub fn advance_loading_frame(&mut self) {
+        if self.loading.is_some() && self.status.is_none() {
+            self.loading_frame = self.loading_frame.wrapping_add(1);
+        }
     }
 
     pub fn current_sync_target(&self) -> Option<(String, String)> {
-        let status = self.status.as_ref()?;
-        let upstream = status.upstream.as_deref()?;
-        let (remote, _) = upstream.split_once('/')?;
-        Some((remote.to_string(), status.branch_name.clone()))
+        branching::current_sync_target(self.status.as_ref())
     }
 
-    pub fn apply_snapshot(
-        &mut self,
-        status: RepoStatus,
-        branches: Vec<BranchInfo>,
-        history: BranchHistory,
-        selected_branch: Option<String>,
-    ) {
-        self.status = Some(status);
-        self.branches = branches;
-        self.log = history.commits;
-        self.graph = history.graph;
-        self.selected_branch = selected_branch;
+    pub fn apply_snapshot(&mut self, snapshot: RepoSnapshot) {
+        self.status = Some(snapshot.status);
+        self.branches = snapshot.branches;
+        self.log = snapshot.history.commits;
+        self.graph = snapshot.history.graph;
+        self.selected_branch = snapshot.selected_branch;
         self.selected_commit = self.selected_commit.min(self.log.len().saturating_sub(1));
         let _ = self.ensure_selected_local_branch_visible();
         let _ = self.ensure_selected_remote_branch_visible();
@@ -750,8 +735,13 @@ impl App {
         }
     }
 
-    pub fn render(&self, frame: &mut Frame<'_>) {
-        let [header, body, actions, footer] = layout::dashboard(frame.area());
+    pub fn render(&mut self, frame: &mut Frame<'_>) {
+        if self.loading.is_some() && self.status.is_none() {
+            self.render_loading_splash(frame);
+            return;
+        }
+
+        let [header, body, footer] = layout::dashboard(frame.area());
         let [left, right] = layout::body(body);
         let [status_area, branches_area] = layout::left_column(left);
         let [search_area, remote_area, local_area] = layout::branch_sections(branches_area);
@@ -769,7 +759,6 @@ impl App {
         frame.render_stateful_widget(self.render_local_branches(), local_area, &mut branch_state);
         let mut graph_state = self.graph_state();
         frame.render_stateful_widget(self.render_graph(right.width), right, &mut graph_state);
-        frame.render_widget(self.render_actions(), actions);
         frame.render_widget(self.render_footer(), footer);
         if self.branch_create_open {
             let popup = self.render_branch_creator();
@@ -795,6 +784,39 @@ impl App {
             frame.render_widget(Clear, area);
             frame.render_widget(popup, area);
         }
+        if self.delete_branch_confirm_is_open() {
+            let popup = self.render_delete_branch_confirm();
+            let area = layout::centered_rect(66, 38, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(popup, area);
+        }
+        if self.help_is_open() {
+            self.render_help(frame);
+        }
+    }
+
+    fn render_loading_splash(&self, frame: &mut Frame<'_>) {
+        let [art_area, text_area] = layout::loading_splash(frame.area());
+        frame.render_widget(Clear, frame.area());
+        frame.render_widget(
+            Paragraph::new(widgets::loading_splash_lines())
+                .style(Style::default().fg(theme::WARNING))
+                .alignment(Alignment::Center),
+            art_area,
+        );
+        frame.render_widget(
+            Paragraph::new(widgets::loading_splash_text(self.loading_frame))
+                .style(
+                    Style::default()
+                        .fg(theme::WARNING)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .alignment(Alignment::Center),
+            text_area.inner(Margin {
+                vertical: 0,
+                horizontal: 1,
+            }),
+        );
     }
 
     fn render_header(&self) -> Paragraph<'_> {
@@ -875,6 +897,14 @@ impl App {
                 ));
             }
         }
+
+        spans.push(Span::raw("  •  "));
+        spans.push(Span::styled(
+            "h = help",
+            Style::default()
+                .fg(theme::WARNING)
+                .add_modifier(Modifier::BOLD),
+        ));
 
         Paragraph::new(Line::from(spans))
             .style(theme::panel_surface_style(true))
@@ -1111,56 +1141,6 @@ impl App {
         None
     }
 
-    fn render_actions(&self) -> Paragraph<'_> {
-        let active = true;
-        let title_color = theme::ACTIONS;
-        let border_color = theme::ACTIONS;
-        let copy = if matches!(self.view, View::Log) {
-            let commit = self.selected_commit().map(|commit| {
-                let short_hash = commit.hash.chars().take(8).collect::<String>();
-                format!("{short_hash} {}", commit.subject)
-            });
-            let commit = commit.as_deref().unwrap_or("no commit selected");
-            [
-                "Keys:",
-                "j/k or arrows = move commits",
-                "1/2/3 = change pane",
-                "Enter = open commit options",
-                "r = refresh",
-                "q = quit",
-                "",
-                "Selected commit:",
-                commit,
-            ]
-            .join("\n")
-        } else {
-            let filter = if self.branch_filter.trim().is_empty() {
-                "none".to_string()
-            } else {
-                self.branch_filter.clone()
-            };
-            format!(
-                "{}\n\nSearch filter:\n{}",
-                widgets::actions_copy(
-                    self.selected_graph_label().as_deref(),
-                    self.sync_target_display().as_deref(),
-                    self.branch_panel,
-                ),
-                filter
-            )
-        };
-
-        Paragraph::new(copy)
-            .style(theme::panel_surface_style(active))
-            .block(
-                Block::default()
-                    .title("Actions")
-                    .title_style(theme::panel_title_style(active, title_color))
-                    .borders(Borders::ALL)
-                    .border_style(theme::panel_border_style(active, border_color)),
-            )
-    }
-
     fn render_footer(&self) -> Paragraph<'_> {
         Paragraph::new(self.footer_text())
             .style(Style::default().fg(match self.message_kind {
@@ -1308,6 +1288,39 @@ impl App {
         )
     }
 
+    fn render_delete_branch_confirm(&self) -> Paragraph<'_> {
+        let (title, body) = match self.delete_branch_target.as_ref() {
+            Some(target @ DeleteBranchTarget::Local { .. }) => (
+                "Delete Local Branch",
+                format!(
+                    "Local branch: {}\n\nThis removes the branch ref from the repository.\nEnter = delete branch • Esc = cancel",
+                    target.display_name()
+                ),
+            ),
+            Some(target @ DeleteBranchTarget::Remote { .. }) => (
+                "Delete Remote Branch",
+                format!(
+                    "Remote branch: {}\n\nThis deletes the branch on the remote and refreshes remote refs.\nEnter = delete branch • Esc = cancel",
+                    target.display_name()
+                ),
+            ),
+            None => (
+                "Delete Branch",
+                String::from("No branch selected.\n\nEnter = close • Esc = close"),
+            ),
+        };
+
+        Paragraph::new(body)
+            .style(theme::panel_surface_style(true))
+            .block(
+                Block::default()
+                    .title(title)
+                    .title_style(theme::panel_title_style(true, theme::ERROR))
+                    .borders(Borders::ALL)
+                    .border_style(theme::panel_border_style(true, theme::ERROR)),
+            )
+    }
+
     fn branch_state(&self) -> ListState {
         let mut state = ListState::default();
         let branches = self.local_branches();
@@ -1339,17 +1352,107 @@ impl App {
         }
         state
     }
+
+    fn render_help(&mut self, frame: &mut Frame<'_>) {
+        let area = frame.area();
+        let [header, body, footer] = layout::dashboard(area);
+        let active_panel = self.branch_panel;
+        let help_lines = widgets::help_lines(
+            self.selected_graph_label().as_deref(),
+            self.sync_target_display().as_deref(),
+            active_panel,
+        );
+        let inner = body.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let areas = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+        let text_area = areas[0];
+        let scrollbar_area = areas[1];
+        let content_length = widgets::wrapped_height(&help_lines, text_area.width as usize);
+        let viewport_height = text_area.height as usize;
+        let max_scroll = content_length.saturating_sub(viewport_height);
+        let scroll_offset = self.help_scroll_offset.min(max_scroll);
+        self.help_scroll_offset = scroll_offset;
+        let scrollbar_content_length = if content_length > viewport_height {
+            max_scroll.saturating_add(1)
+        } else {
+            0
+        };
+        let mut scrollbar_state = ScrollbarState::new(scrollbar_content_length)
+            .position(scroll_offset)
+            .viewport_content_length(viewport_height);
+
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new("")
+                .style(theme::panel_surface_style(true))
+                .block(
+                    Block::default()
+                        .title("gitrex help")
+                        .title_style(theme::panel_title_style(true, theme::WARNING))
+                        .borders(Borders::ALL)
+                        .border_style(theme::panel_border_style(true, theme::WARNING)),
+                ),
+            header,
+        );
+        frame.render_widget(
+            Block::default()
+                .title("Shortcuts")
+                .title_style(theme::panel_title_style(true, theme::TEXT))
+                .borders(Borders::ALL)
+                .border_style(theme::panel_border_style(true, theme::TEXT)),
+            body,
+        );
+        frame.render_widget(
+            Paragraph::new(help_lines)
+                .style(theme::panel_surface_style(true))
+                .scroll((scroll_offset as u16, 0))
+                .wrap(Wrap { trim: false }),
+            text_area,
+        );
+        if scrollbar_content_length > 0 {
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓")),
+                scrollbar_area,
+                &mut scrollbar_state,
+            );
+        }
+        frame.render_widget(
+            Paragraph::new(self.footer_text())
+                .style(Style::default().fg(match self.message_kind {
+                    MessageKind::Info => theme::TEXT,
+                    MessageKind::Success => theme::SUCCESS,
+                    MessageKind::Warning => theme::WARNING,
+                    MessageKind::Error => theme::ERROR,
+                }))
+                .block(
+                    Block::default()
+                        .title("Message")
+                        .title_style(theme::panel_title_style(true, theme::ACTIONS))
+                        .borders(Borders::ALL)
+                        .border_style(theme::panel_border_style(true, theme::ACTIONS)),
+                ),
+            footer,
+        );
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{theme, App, BranchPanel, CommitAction, MessageKind, PickerAction, View};
+    use super::{
+        theme, App, BranchPanel, CommitAction, DeleteBranchTarget, MessageKind, PickerAction,
+        RemoteBranchAction, View,
+    };
     use crate::domain::{BranchInfo, BranchKind, RepoStatus};
 
     #[test]
     fn picker_action_labels_are_clear() {
         assert_eq!(PickerAction::Checkout.label(), "checkout branch");
         assert_eq!(PickerAction::Push.label(), "push current branch");
+        assert_eq!(PickerAction::DeleteBranch.label(), "delete branch");
     }
 
     #[test]
@@ -1359,6 +1462,41 @@ mod tests {
         app.select_view(View::Log);
         assert_eq!(app.view, View::Log);
         assert_eq!(app.message, "Saved");
+    }
+
+    #[test]
+    fn help_view_opens_and_closes_back_to_previous_view() {
+        let mut app = App::new();
+        app.select_view(View::Log);
+
+        app.open_help();
+        assert_eq!(app.help_scroll_offset, 0);
+        assert!(app.help_is_open());
+        assert_eq!(app.view, View::Help);
+
+        app.move_help_scroll(3);
+        assert_eq!(app.help_scroll_offset, 3);
+
+        app.close_help();
+        assert_eq!(app.help_scroll_offset, 0);
+        assert_eq!(app.view, View::Log);
+
+        app.open_help();
+        app.select_view(View::Status);
+        app.close_help();
+        assert_eq!(app.view, View::Status);
+    }
+
+    #[test]
+    fn help_scroll_moves_without_underflow() {
+        let mut app = App::new();
+        app.open_help();
+
+        app.move_help_scroll(4);
+        app.move_help_scroll(-2);
+        app.move_help_scroll(-20);
+
+        assert_eq!(app.help_scroll_offset, 0);
     }
 
     #[test]
@@ -1676,6 +1814,24 @@ mod tests {
     }
 
     #[test]
+    fn picker_actions_include_delete_branch_last() {
+        let app = App::new();
+        assert_eq!(
+            app.picker_actions().last().copied(),
+            Some(PickerAction::DeleteBranch)
+        );
+    }
+
+    #[test]
+    fn remote_actions_include_delete_branch_last() {
+        let app = App::new();
+        assert_eq!(
+            app.remote_branch_actions().last().copied(),
+            Some(RemoteBranchAction::DeleteRemoteBranch)
+        );
+    }
+
+    #[test]
     fn branch_create_request_uses_trimmed_input_and_source() {
         let mut app = App::new();
         app.branch_create_open = true;
@@ -1712,5 +1868,27 @@ mod tests {
 
         assert!(app.branch_create_is_open());
         assert_eq!(app.branch_create_accent, theme::PURPLE);
+    }
+
+    #[test]
+    fn delete_branch_confirmation_tracks_target() {
+        let mut app = App::new();
+
+        app.open_delete_branch_confirm(DeleteBranchTarget::Local {
+            branch: "feature/login".to_string(),
+        });
+
+        assert!(app.delete_branch_confirm_is_open());
+        assert_eq!(
+            app.delete_branch_target(),
+            Some(DeleteBranchTarget::Local {
+                branch: "feature/login".to_string()
+            })
+        );
+        assert!(app.footer_text().contains("extra dangerous"));
+
+        app.close_delete_branch_confirm();
+        assert!(!app.delete_branch_confirm_is_open());
+        assert_eq!(app.delete_branch_target(), None);
     }
 }
