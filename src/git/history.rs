@@ -5,7 +5,10 @@ use crate::domain::{BranchHistory, CommitSummary, GraphLine};
 
 use super::GitClient;
 
-pub fn read_branch_history(client: &GitClient, reference: &str) -> crate::domain::Result<BranchHistory> {
+pub fn read_branch_history(
+    client: &GitClient,
+    reference: &str,
+) -> crate::domain::Result<BranchHistory> {
     let repo = client.repo()?;
     let start = resolve_reference(&repo, reference)?;
     let commits = collect_commits(&repo, start)?;
@@ -159,7 +162,13 @@ mod tests {
         let client = GitClient::new();
         let history = read_branch_history(&client, "main").unwrap();
 
-        assert!(history.commits.iter().any(|entry| entry.subject == "main work"));
-        assert!(!history.commits.iter().any(|entry| entry.subject == "feature work"));
+        assert!(history
+            .commits
+            .iter()
+            .any(|entry| entry.subject == "main work"));
+        assert!(!history
+            .commits
+            .iter()
+            .any(|entry| entry.subject == "feature work"));
     }
 }

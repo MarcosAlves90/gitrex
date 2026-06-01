@@ -29,6 +29,18 @@ pub fn left_column(area: Rect) -> [Rect; 2] {
     [rows[0], rows[1]]
 }
 
+pub fn branch_sections(area: Rect) -> [Rect; 3] {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Min(8),
+        ])
+        .split(area);
+    [rows[0], rows[1], rows[2]]
+}
+
 pub fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)

@@ -1,6 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use git2::{
     build::CheckoutBuilder, BranchType, ErrorCode, ObjectType, Oid, PushOptions, RemoteCallbacks,
@@ -105,7 +103,11 @@ impl GitClient {
         let repo = self.repo()?;
         let branch_name = branch
             .map(ToOwned::to_owned)
-            .or_else(|| repo.head().ok().and_then(|head| head.shorthand().map(ToOwned::to_owned)))
+            .or_else(|| {
+                repo.head()
+                    .ok()
+                    .and_then(|head| head.shorthand().map(ToOwned::to_owned))
+            })
             .ok_or(GitError::NotRepository)?;
         let remote_name = remote.unwrap_or("origin");
 
@@ -147,7 +149,11 @@ impl GitClient {
         let repo = self.repo()?;
         let branch_name = branch
             .map(ToOwned::to_owned)
-            .or_else(|| repo.head().ok().and_then(|head| head.shorthand().map(ToOwned::to_owned)))
+            .or_else(|| {
+                repo.head()
+                    .ok()
+                    .and_then(|head| head.shorthand().map(ToOwned::to_owned))
+            })
             .ok_or(GitError::NotRepository)?;
         let remote_name = remote.unwrap_or("origin");
         let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
@@ -167,7 +173,10 @@ impl GitClient {
 
 fn resolve_commit_oid(repo: &Repository, reference: &str) -> Result<Oid> {
     let object = repo.revparse_single(reference).map_err(map_git_error)?;
-    object.peel_to_commit().map_err(map_git_error).map(|commit| commit.id())
+    object
+        .peel_to_commit()
+        .map_err(map_git_error)
+        .map(|commit| commit.id())
 }
 
 fn default_clone_path(repository: &str) -> PathBuf {

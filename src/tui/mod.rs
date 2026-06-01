@@ -6,8 +6,7 @@ mod theme;
 mod widgets;
 
 use crossterm::{
-    event,
-    execute,
+    event, execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -28,9 +27,10 @@ pub fn run(client: GitClient) -> anyhow::Result<()> {
     let mut terminal = Terminal::new(backend)?;
     let mut controller = controller::TuiController::new(client);
     if let Err(error) = controller.refresh() {
-        controller
-            .app_mut()
-            .set_feedback(format!("Unable to load repository: {error}"), app::MessageKind::Error);
+        controller.app_mut().set_feedback(
+            format!("Unable to load repository: {error}"),
+            app::MessageKind::Error,
+        );
     }
 
     let result = loop {

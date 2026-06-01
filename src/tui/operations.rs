@@ -8,8 +8,15 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationRequest {
-    Checkout { branch: String },
-    Switch { branch: String },
+    Checkout {
+        branch: String,
+    },
+    CheckoutDetached {
+        target: String,
+    },
+    Switch {
+        branch: String,
+    },
     CreateBranch {
         branch: String,
         start_point: String,
@@ -28,11 +35,18 @@ impl OperationRequest {
     pub fn loading_label(&self) -> String {
         match self {
             OperationRequest::Checkout { branch } => format!("Checking out {branch}"),
+            OperationRequest::CheckoutDetached { target } => {
+                format!("Checking out detached HEAD at {target}")
+            }
             OperationRequest::Switch { branch } => format!("Switching to {branch}"),
-            OperationRequest::CreateBranch { branch, start_point } => {
+            OperationRequest::CreateBranch {
+                branch,
+                start_point,
+            } => {
                 format!("Creating {branch} from {start_point}")
             }
-            OperationRequest::Pull { remote, branch } | OperationRequest::Push { remote, branch } => {
+            OperationRequest::Pull { remote, branch }
+            | OperationRequest::Push { remote, branch } => {
                 match (remote.as_deref(), branch.as_deref()) {
                     (Some(remote), Some(branch)) => format!("{remote}/{branch}"),
                     _ => String::from("current branch"),
@@ -44,8 +58,14 @@ impl OperationRequest {
     pub fn success_label(&self) -> String {
         match self {
             OperationRequest::Checkout { branch } => format!("Checked out {branch}"),
+            OperationRequest::CheckoutDetached { target } => {
+                format!("Checked out detached HEAD at {target}")
+            }
             OperationRequest::Switch { branch } => format!("Switched to {branch}"),
-            OperationRequest::CreateBranch { branch, start_point } => {
+            OperationRequest::CreateBranch {
+                branch,
+                start_point,
+            } => {
                 format!("Created {branch} from {start_point}")
             }
             OperationRequest::Pull { remote, branch } => {
@@ -69,7 +89,7 @@ pub struct RepoSnapshot {
     pub status: Option<RepoStatus>,
     pub branches: Vec<BranchInfo>,
     pub history: BranchHistory,
-    pub selected_branch: usize,
+    pub selected_branch: Option<String>,
 }
 
 #[derive(Debug)]
@@ -109,16 +129,18 @@ pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
     let branches = client.branches().map_err(|error| error.to_string())?;
     let selected_branch = branches
         .iter()
-        .position(|branch| branch.current && matches!(branch.kind, crate::domain::BranchKind::Local))
-        .or_else(|| {
-            branches
-                .iter()
-                .position(|branch| matches!(branch.kind, crate::domain::BranchKind::Local) && branch.name == status.branch_name)
+        .position(|branch| {
+            branch.current && matches!(branch.kind, crate::domain::BranchKind::Local)
         })
-        .unwrap_or(0);
-    let graph_ref = branches
-        .get(selected_branch)
-        .map(|branch| branch.name.as_str())
+        .or_else(|| {
+            branches.iter().position(|branch| {
+                matches!(branch.kind, crate::domain::BranchKind::Local)
+                    && branch.name == status.branch_name
+            })
+        })
+        .and_then(|index| branches.get(index).map(|branch| branch.name.clone()));
+    let graph_ref = selected_branch
+        .as_deref()
         .unwrap_or(status.branch_name.as_str());
     let history = client
         .history_for_ref(graph_ref)
@@ -138,10 +160,16 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
         OperationRequest::Checkout { branch } => client
             .checkout(&branch)
             .map(|_| format!("Checked out {branch}")),
+        OperationRequest::CheckoutDetached { target } => client
+            .checkout(&target)
+            .map(|_| format!("Checked out detached HEAD at {target}")),
         OperationRequest::Switch { branch } => client
             .switch(&branch)
             .map(|_| format!("Switched to {branch}")),
-        OperationRequest::CreateBranch { branch, start_point } => client
+        OperationRequest::CreateBranch {
+            branch,
+            start_point,
+        } => client
             .create_branch(&branch, Some(&start_point))
             .map(|_| format!("Created {branch} from {start_point}")),
         OperationRequest::Pull { remote, branch } => client
@@ -175,9 +203,37 @@ mod tests {
 
     #[test]
     fn request_labels_are_clear() {
-        assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.loading_label(), "origin/main");
-        assert_eq!(OperationRequest::Pull { remote: Some("origin".into()), branch: Some("main".into()) }.success_label(), "Pulled origin/main");
-        assert_eq!(OperationRequest::CreateBranch { branch: "feature/login".into(), start_point: "main".into() }.loading_label(), "Creating feature/login from main");
+        assert_eq!(
+            OperationRequest::Pull {
+                remote: Some("origin".into()),
+                branch: Some("main".into())
+            }
+            .loading_label(),
+            "origin/main"
+        );
+        assert_eq!(
+            OperationRequest::Pull {
+                remote: Some("origin".into()),
+                branch: Some("main".into())
+            }
+            .success_label(),
+            "Pulled origin/main"
+        );
+        assert_eq!(
+            OperationRequest::CreateBranch {
+                branch: "feature/login".into(),
+                start_point: "main".into()
+            }
+            .loading_label(),
+            "Creating feature/login from main"
+        );
+        assert_eq!(
+            OperationRequest::CheckoutDetached {
+                target: "refs/remotes/origin/main".into()
+            }
+            .loading_label(),
+            "Checking out detached HEAD at refs/remotes/origin/main"
+        );
     }
 
     #[test]
@@ -233,5 +289,4 @@ mod tests {
             .iter()
             .any(|entry| entry.subject == "feature work"));
     }
-
 }

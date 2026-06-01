@@ -10,7 +10,12 @@ pub fn list_branches(client: &GitClient) -> crate::domain::Result<Vec<BranchInfo
 
     collect_branches(&repo, BranchType::Local, &mut branches)?;
     collect_branches(&repo, BranchType::Remote, &mut branches)?;
-    branches.sort_by(|left, right| right.commit.cmp(&left.commit).then_with(|| left.name.cmp(&right.name)));
+    branches.sort_by(|left, right| {
+        right
+            .commit
+            .cmp(&left.commit)
+            .then_with(|| left.name.cmp(&right.name))
+    });
 
     Ok(branches)
 }
@@ -63,11 +68,10 @@ fn collect_branches(
             .map_err(map_error)?
             .unwrap_or_default()
             .to_string();
-        let commit = branch
-            .get()
-            .target()
-            .map(short_oid)
-            .unwrap_or_default();
+        if matches!(kind, BranchType::Remote) && name == "HEAD" {
+            continue;
+        }
+        let commit = branch.get().target().map(short_oid).unwrap_or_default();
         let subject = branch
             .get()
             .peel_to_commit()
@@ -78,7 +82,8 @@ fn collect_branches(
             .upstream()
             .ok()
             .and_then(|upstream| upstream.name().ok().flatten().map(|name| name.to_string()));
-        let current = head_name.as_deref() == Some(name.as_str()) && matches!(branch_type, BranchType::Local);
+        let current =
+            head_name.as_deref() == Some(name.as_str()) && matches!(branch_type, BranchType::Local);
 
         branches.push(BranchInfo {
             name,

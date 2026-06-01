@@ -1,4 +1,6 @@
-use crate::domain::{BranchInfo, CommitSummary, GraphLine, RepoStatus, StatusEntry};
+use crate::domain::{
+    build_branch_catalog, BranchInfo, CommitSummary, GraphLine, RepoStatus, StatusEntry,
+};
 use ratatui::prelude::{Line, Modifier, Span, Style};
 
 pub fn print_status(status: &RepoStatus) {
@@ -20,18 +22,34 @@ pub fn print_status(status: &RepoStatus) {
 }
 
 pub fn print_branches(branches: &[BranchInfo]) {
-    for branch in branches {
-        let marker = if branch.current { "*" } else { " " };
-        match &branch.upstream {
-            Some(upstream) => println!("{marker} {} -> {}", branch.name, upstream),
-            None => println!("{marker} {}", branch.name),
+    let catalog = build_branch_catalog(branches);
+
+    println!("remote branches:");
+    for group in &catalog.remotes {
+        println!("  {}", group.remote);
+        for branch in &group.branches {
+            println!("    {}", branch.branch_short_name());
         }
+    }
+
+    println!("local branches:");
+    for entry in &catalog.locals {
+        let marker = if entry.branch.current { "*" } else { " " };
+        let status = if entry.synced_remotes.is_empty() {
+            String::from("local-only")
+        } else {
+            format!("synced: {}", entry.synced_remotes.join(", "))
+        };
+        println!("{marker} {} [{}]", entry.branch.name, status);
     }
 }
 
 pub fn print_log(entries: &[CommitSummary]) {
     for entry in entries {
-        println!("{} {} {} {}", entry.hash, entry.author, entry.date, entry.subject);
+        println!(
+            "{} {} {} {}",
+            entry.hash, entry.author, entry.date, entry.subject
+        );
     }
 }
 
@@ -57,17 +75,29 @@ pub fn render_status_summary(status: &RepoStatus) -> String {
 }
 
 pub fn render_branch_preview(branches: &[BranchInfo]) -> Vec<String> {
-    branches
-        .iter()
-        .take(8)
-        .map(|branch| {
-            let marker = if branch.current { "*" } else { " " };
-            match &branch.upstream {
-                Some(upstream) => format!("{marker} {} -> {}", branch.name, upstream),
-                None => format!("{marker} {}", branch.name),
-            }
-        })
-        .collect()
+    let catalog = build_branch_catalog(branches);
+    let mut lines = Vec::new();
+
+    lines.push(String::from("remote branches:"));
+    for group in catalog.remotes.iter().take(4) {
+        lines.push(format!("  {}", group.remote));
+        for branch in group.branches.iter().take(4) {
+            lines.push(format!("    {}", branch.branch_short_name()));
+        }
+    }
+
+    lines.push(String::from("local branches:"));
+    for entry in catalog.locals.iter().take(4) {
+        let marker = if entry.branch.current { "*" } else { " " };
+        let status = if entry.synced_remotes.is_empty() {
+            String::from("local-only")
+        } else {
+            format!("synced: {}", entry.synced_remotes.join(", "))
+        };
+        lines.push(format!("{marker} {} [{status}]", entry.branch.name));
+    }
+
+    lines
 }
 
 pub fn render_log_preview(entries: &[CommitSummary]) -> Vec<String> {
@@ -83,26 +113,25 @@ pub fn render_graph_rows(
     selected: usize,
     offset: usize,
     width: u16,
+    active: bool,
 ) -> Vec<Line<'static>> {
     let content_width = width.saturating_sub(2) as usize;
     let mut commit_index = 0usize;
-    rows
-        .iter()
+    rows.iter()
         .enumerate()
-        .map(|(_, row)| {
-            match row {
-                GraphLine::Connector { graph } => render_graph_connector(graph),
-                GraphLine::Commit { graph, summary } => {
-                    let line = render_graph_line(
-                        graph,
-                        summary,
-                        commit_index == selected,
-                        offset,
-                        content_width,
-                    );
-                    commit_index = commit_index.saturating_add(1);
-                    line
-                }
+        .map(|(_, row)| match row {
+            GraphLine::Connector { graph } => render_graph_connector(graph),
+            GraphLine::Commit { graph, summary } => {
+                let line = render_graph_line(
+                    graph,
+                    summary,
+                    commit_index == selected,
+                    offset,
+                    content_width,
+                    active,
+                );
+                commit_index = commit_index.saturating_add(1);
+                line
             }
         })
         .collect()
@@ -116,12 +145,7 @@ fn scroll_text(text: &str, offset: usize, width: usize) -> String {
     let marquee = format!("{text}   |   {text}   |   ");
     let chars = marquee.chars().collect::<Vec<_>>();
     let start = offset % chars.len().max(1);
-    chars
-        .iter()
-        .cycle()
-        .skip(start)
-        .take(width)
-        .collect()
+    chars.iter().cycle().skip(start).take(width).collect()
 }
 
 fn clip_text(text: &str, width: usize) -> String {
@@ -139,8 +163,14 @@ fn pad_text(text: &str, width: usize) -> String {
 
 fn render_graph_connector(graph: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled("  ", Style::default().fg(ratatui::style::Color::Rgb(33, 38, 45))),
-        Span::styled(graph.to_string(), Style::default().fg(ratatui::style::Color::Rgb(139, 148, 158))),
+        Span::styled(
+            "  ",
+            Style::default().fg(ratatui::style::Color::Rgb(33, 38, 45)),
+        ),
+        Span::styled(
+            graph.to_string(),
+            Style::default().fg(ratatui::style::Color::Rgb(139, 148, 158)),
+        ),
     ])
 }
 
@@ -150,12 +180,25 @@ fn render_graph_line(
     selected: bool,
     offset: usize,
     content_width: usize,
+    active: bool,
 ) -> Line<'static> {
     let subject_style = Style::default()
-        .fg(ratatui::style::Color::Rgb(230, 237, 243))
+        .fg(if active {
+            ratatui::style::Color::Rgb(230, 237, 243)
+        } else {
+            ratatui::style::Color::Rgb(139, 148, 158)
+        })
         .add_modifier(Modifier::BOLD);
-    let date_style = Style::default().fg(ratatui::style::Color::Rgb(210, 153, 34));
-    let hash_style = Style::default().fg(ratatui::style::Color::Rgb(168, 85, 247));
+    let date_style = Style::default().fg(if active {
+        ratatui::style::Color::Rgb(210, 153, 34)
+    } else {
+        ratatui::style::Color::Rgb(139, 148, 158)
+    });
+    let hash_style = Style::default().fg(if active {
+        ratatui::style::Color::Rgb(168, 85, 247)
+    } else {
+        ratatui::style::Color::Rgb(139, 148, 158)
+    });
     let separator_style = Style::default().fg(ratatui::style::Color::Rgb(33, 38, 45));
 
     let short_hash = entry.hash.chars().take(8).collect::<String>();
@@ -209,6 +252,7 @@ pub fn render_status_entries(entries: &[StatusEntry]) -> Vec<String> {
 mod tests {
     use super::{render_graph_rows, render_graph_title, scroll_text};
     use crate::domain::{CommitSummary, GraphLine};
+    use ratatui::style::Color;
 
     #[test]
     fn graph_title_shows_current_branch() {
@@ -248,7 +292,7 @@ mod tests {
             },
         ];
 
-        let lines = render_graph_rows(&graph, 1, 0, 80);
+        let lines = render_graph_rows(&graph, 1, 0, 80, true);
         assert_eq!(lines.len(), 3);
         let line_one = lines[1]
             .spans
@@ -276,8 +320,8 @@ mod tests {
             },
         }];
 
-        let first = render_graph_rows(&graph, 0, 0, 60);
-        let second = render_graph_rows(&graph, 0, 5, 60);
+        let first = render_graph_rows(&graph, 0, 0, 60, true);
+        let second = render_graph_rows(&graph, 0, 5, 60, true);
         assert_eq!(first.len(), 1);
         assert_eq!(second.len(), 1);
         assert_ne!(first[0], second[0]);
@@ -309,8 +353,8 @@ mod tests {
             },
         ];
 
-        let first = render_graph_rows(&graph, 0, 0, 60);
-        let second = render_graph_rows(&graph, 0, 5, 60);
+        let first = render_graph_rows(&graph, 0, 0, 60, true);
+        let second = render_graph_rows(&graph, 0, 5, 60, true);
         assert_ne!(first[0], second[0]);
         assert_eq!(first[1], second[1]);
     }
@@ -336,8 +380,8 @@ mod tests {
             },
         }];
 
-        let short_line = render_graph_rows(&short, 0, 0, 80);
-        let long_line = render_graph_rows(&long, 0, 0, 80);
+        let short_line = render_graph_rows(&short, 0, 0, 80, true);
+        let long_line = render_graph_rows(&long, 0, 0, 80, true);
         let short_text = short_line[0]
             .spans
             .iter()
@@ -351,6 +395,35 @@ mod tests {
 
         assert_eq!(short_text.find("2026-05-24"), long_text.find("2026-05-24"));
         assert_eq!(short_text.find("abc123de"), long_text.find("abc123de"));
+    }
+
+    #[test]
+    fn graph_inactive_panels_use_muted_text_colors() {
+        let graph = vec![GraphLine::Commit {
+            graph: "*".to_string(),
+            summary: CommitSummary {
+                hash: "abc123def456".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "A much longer commit name".to_string(),
+            },
+        }];
+
+        let lines = render_graph_rows(&graph, 0, 0, 80, false);
+        let commit_line = &lines[0];
+
+        assert_eq!(
+            commit_line.spans[3].style.fg,
+            Some(Color::Rgb(139, 148, 158))
+        );
+        assert_eq!(
+            commit_line.spans[5].style.fg,
+            Some(Color::Rgb(139, 148, 158))
+        );
+        assert_eq!(
+            commit_line.spans[7].style.fg,
+            Some(Color::Rgb(139, 148, 158))
+        );
     }
 
     #[test]
