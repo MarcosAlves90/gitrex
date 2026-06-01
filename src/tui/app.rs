@@ -869,7 +869,7 @@ impl App {
         }
 
         Paragraph::new(Line::from(spans))
-            .style(theme::panel_surface_style(true, theme::SURFACE))
+            .style(theme::panel_surface_style(true))
             .block(
                 Block::default()
                     .title("gitrex")
@@ -889,7 +889,7 @@ impl App {
             .unwrap_or_else(|| "no repository loaded".to_string());
 
         Paragraph::new(text)
-            .style(theme::panel_surface_style(active, theme::SURFACE))
+            .style(theme::panel_surface_style(active))
             .block(
                 Block::default()
                     .title("Status")
@@ -917,7 +917,7 @@ impl App {
         };
 
         Paragraph::new(text)
-            .style(theme::panel_surface_style(active, theme::SURFACE_ALT))
+            .style(theme::panel_surface_style(active))
             .block(
                 Block::default()
                     .title("Branch Search")
@@ -1143,7 +1143,7 @@ impl App {
         };
 
         Paragraph::new(copy)
-            .style(theme::panel_surface_style(active, theme::SURFACE_ALT))
+            .style(theme::panel_surface_style(active))
             .block(
                 Block::default()
                     .title("Actions")
@@ -1162,8 +1162,7 @@ impl App {
                         MessageKind::Success => theme::SUCCESS,
                         MessageKind::Warning => theme::WARNING,
                         MessageKind::Error => theme::ERROR,
-                    })
-                    .bg(theme::SURFACE),
+                    }),
             )
             .block(
                 Block::default()
@@ -1202,7 +1201,7 @@ impl App {
         Paragraph::new(format!(
             "Branch: {branch}\nSync target: {sync_target}\n\n{options}\n\nEnter = confirm • Esc = close"
         ))
-        .style(theme::panel_surface_style(active, theme::SURFACE))
+            .style(theme::panel_surface_style(active))
         .block(
             Block::default()
                 .title("Branch Actions")
@@ -1237,7 +1236,7 @@ impl App {
         Paragraph::new(format!(
             "Remote branch: {branch}\n\n{options}\n\nEnter = confirm • Esc = close"
         ))
-        .style(theme::panel_surface_style(active, theme::SURFACE))
+            .style(theme::panel_surface_style(active))
         .block(
             Block::default()
                 .title("Remote Branch Actions")
@@ -1258,7 +1257,7 @@ impl App {
         Paragraph::new(format!(
             "Source branch: {source}\nNew branch name: {name}\n\nEnter = create • Esc = cancel • Backspace = delete"
         ))
-        .style(theme::panel_surface_style(true, theme::SURFACE))
+            .style(theme::panel_surface_style(true))
         .block(
             Block::default()
                 .title("Create Branch")
@@ -1294,7 +1293,7 @@ impl App {
         Paragraph::new(format!(
             "Commit: {commit}\n\n{options}\n\nEnter = confirm • Esc = close"
         ))
-        .style(theme::panel_surface_style(true, theme::SURFACE))
+            .style(theme::panel_surface_style(true))
         .block(
             Block::default()
                 .title("Commit Actions")

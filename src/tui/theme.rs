@@ -1,7 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
 pub const BG: Color = Color::Rgb(13, 17, 23);
-pub const SURFACE: Color = Color::Rgb(22, 27, 34);
 pub const SURFACE_ALT: Color = Color::Rgb(33, 38, 45);
 pub const TEXT: Color = Color::Rgb(230, 237, 243);
 pub const MUTED: Color = Color::Rgb(139, 148, 158);
@@ -23,10 +22,8 @@ pub fn panel_border_style(active: bool, accent: Color) -> Style {
     Style::default().fg(if active { accent } else { MUTED })
 }
 
-pub fn panel_surface_style(active: bool, background: Color) -> Style {
-    Style::default()
-        .fg(if active { TEXT } else { MUTED })
-        .bg(background)
+pub fn panel_surface_style(active: bool) -> Style {
+    Style::default().fg(if active { TEXT } else { MUTED })
 }
 
 pub fn panel_highlight_style(active: bool, accent: Color) -> Style {
