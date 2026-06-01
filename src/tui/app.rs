@@ -20,6 +20,28 @@ pub enum View {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchPanel {
+    Local,
+    Remote,
+}
+
+impl BranchPanel {
+    pub fn label(self) -> &'static str {
+        match self {
+            BranchPanel::Local => "local",
+            BranchPanel::Remote => "remote",
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            BranchPanel::Local => BranchPanel::Remote,
+            BranchPanel::Remote => BranchPanel::Local,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
     Info,
     Success,
@@ -34,6 +56,12 @@ pub enum PickerAction {
     Pull,
     Push,
     CreateBranch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteBranchAction {
+    CreateLocalBranch,
+    CheckoutDetached,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +91,15 @@ impl PickerAction {
     }
 }
 
+impl RemoteBranchAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            RemoteBranchAction::CreateLocalBranch => "create local branch",
+            RemoteBranchAction::CheckoutDetached => "checkout detached HEAD",
+        }
+    }
+}
+
 pub struct App {
     pub(crate) view: View,
     pub(crate) status: Option<RepoStatus>,
@@ -70,9 +107,13 @@ pub struct App {
     pub(crate) log: Vec<CommitSummary>,
     pub(crate) graph: Vec<GraphLine>,
     pub(crate) selected_branch: Option<String>,
+    pub(crate) selected_remote_branch: Option<String>,
+    pub(crate) branch_panel: BranchPanel,
     pub(crate) selected_commit: usize,
     pub(crate) picker_open: bool,
     pub(crate) picker_index: usize,
+    pub(crate) remote_picker_open: bool,
+    pub(crate) remote_picker_index: usize,
     pub(crate) commit_actions_open: bool,
     pub(crate) commit_action_index: usize,
     pub(crate) graph_scroll_offset: usize,
@@ -96,9 +137,13 @@ impl App {
             log: Vec::new(),
             graph: Vec::new(),
             selected_branch: None,
+            selected_remote_branch: None,
+            branch_panel: BranchPanel::Local,
             selected_commit: 0,
             picker_open: false,
             picker_index: 0,
+            remote_picker_open: false,
+            remote_picker_index: 0,
             commit_actions_open: false,
             commit_action_index: 0,
             graph_scroll_offset: 0,
@@ -130,8 +175,32 @@ impl App {
         })
     }
 
+    pub fn selected_remote_branch(&self) -> Option<&BranchInfo> {
+        let selected = self.selected_remote_branch.as_deref()?;
+        self.branches.iter().find(|branch| {
+            matches!(branch.kind, crate::domain::BranchKind::Remote)
+                && branch.full_ref() == selected
+        })
+    }
+
+    pub fn branch_panel(&self) -> BranchPanel {
+        self.branch_panel
+    }
+
+    pub fn set_branch_panel(&mut self, panel: BranchPanel) {
+        self.branch_panel = panel;
+    }
+
+    pub fn toggle_branch_panel(&mut self) {
+        self.set_branch_panel(self.branch_panel.toggled());
+    }
+
     pub fn local_branches(&self) -> Vec<&BranchInfo> {
         self.filtered_local_branches()
+    }
+
+    pub fn remote_branches(&self) -> Vec<&BranchInfo> {
+        self.filtered_remote_branches()
     }
 
     pub fn open_branch_search(&mut self) {
@@ -164,9 +233,12 @@ impl App {
             return false;
         }
 
+        let previous = self.selected_graph_ref();
         self.branch_search_open = false;
         self.branch_filter = self.branch_search_input.trim().to_string();
-        self.ensure_selected_branch_visible()
+        self.ensure_selected_local_branch_visible();
+        self.ensure_selected_remote_branch_visible();
+        previous != self.selected_graph_ref()
     }
 
     pub fn close_branch_search(&mut self) {
@@ -189,6 +261,10 @@ impl App {
         self.branch_create_open
     }
 
+    pub fn remote_picker_is_open(&self) -> bool {
+        self.remote_picker_open
+    }
+
     pub fn commit_actions_are_open(&self) -> bool {
         self.commit_actions_open
     }
@@ -198,7 +274,64 @@ impl App {
             .map(|(remote, branch)| format!("{remote}/{branch}"))
     }
 
+    pub fn selected_graph_ref(&self) -> Option<String> {
+        match self.branch_panel {
+            BranchPanel::Local => self
+                .selected_branch()
+                .map(|branch| branch.name.clone())
+                .or_else(|| {
+                    self.status
+                        .as_ref()
+                        .map(|status| status.branch_name.clone())
+                }),
+            BranchPanel::Remote => self
+                .selected_remote_branch()
+                .map(|branch| branch.full_ref())
+                .or_else(|| {
+                    self.selected_branch()
+                        .map(|branch| branch.name.clone())
+                        .or_else(|| {
+                            self.status
+                                .as_ref()
+                                .map(|status| status.branch_name.clone())
+                        })
+                }),
+        }
+    }
+
+    pub fn selected_graph_label(&self) -> Option<String> {
+        match self.branch_panel {
+            BranchPanel::Local => self
+                .selected_branch()
+                .map(|branch| branch.name.clone())
+                .or_else(|| {
+                    self.status
+                        .as_ref()
+                        .map(|status| status.branch_name.clone())
+                }),
+            BranchPanel::Remote => self
+                .selected_remote_branch()
+                .map(|branch| branch.display_name())
+                .or_else(|| {
+                    self.selected_branch()
+                        .map(|branch| branch.name.clone())
+                        .or_else(|| {
+                            self.status
+                                .as_ref()
+                                .map(|status| status.branch_name.clone())
+                        })
+                }),
+        }
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
+        match self.branch_panel {
+            BranchPanel::Local => self.move_local_selection(delta),
+            BranchPanel::Remote => self.move_remote_selection(delta),
+        }
+    }
+
+    fn move_local_selection(&mut self, delta: isize) {
         let branches = self.filtered_local_branches();
         let branch_count = branches.len();
         if branch_count == 0 {
@@ -220,6 +353,32 @@ impl App {
             .name
             .clone();
         self.selected_branch = Some(selected);
+    }
+
+    fn move_remote_selection(&mut self, delta: isize) {
+        let branches = self.filtered_remote_branches();
+        let branch_count = branches.len();
+        if branch_count == 0 {
+            self.selected_remote_branch = None;
+            return;
+        }
+
+        let current_index = self
+            .selected_remote_branch
+            .as_deref()
+            .and_then(|selected| {
+                branches
+                    .iter()
+                    .position(|branch| branch.full_ref() == selected)
+            })
+            .unwrap_or(0);
+        let next = if delta.is_negative() {
+            current_index.saturating_sub(delta.unsigned_abs())
+        } else {
+            current_index.saturating_add(delta as usize)
+        };
+        let selected = branches[next.min(branch_count.saturating_sub(1))].full_ref();
+        self.selected_remote_branch = Some(selected);
     }
 
     pub fn move_commit_selection(&mut self, delta: isize) {
@@ -262,6 +421,21 @@ impl App {
 
     pub fn close_picker(&mut self) {
         self.picker_open = false;
+    }
+
+    pub fn open_remote_picker(&mut self) {
+        if self.selected_remote_branch().is_none() {
+            self.set_feedback("No remote branch selected.", MessageKind::Warning);
+            return;
+        }
+        self.remote_picker_open = true;
+        self.remote_picker_index = 0;
+        self.message = "Choose an action for the selected remote branch.".to_string();
+        self.message_kind = MessageKind::Info;
+    }
+
+    pub fn close_remote_picker(&mut self) {
+        self.remote_picker_open = false;
     }
 
     pub fn open_commit_actions(&mut self) {
@@ -351,6 +525,22 @@ impl App {
         .any(|haystack| haystack.contains(&query))
     }
 
+    fn filtered_remote_branches(&self) -> Vec<&BranchInfo> {
+        let mut branches = self
+            .branches
+            .iter()
+            .filter(|branch| matches!(branch.kind, crate::domain::BranchKind::Remote))
+            .filter(|branch| self.branch_filter_matches(branch))
+            .collect::<Vec<_>>();
+        branches.sort_by(|left, right| {
+            left.remote_name()
+                .cmp(&right.remote_name())
+                .then_with(|| left.branch_short_name().cmp(right.branch_short_name()))
+                .then_with(|| right.commit.cmp(&left.commit))
+        });
+        branches
+    }
+
     fn filtered_local_branches(&self) -> Vec<&BranchInfo> {
         let mut branches = self
             .branches
@@ -367,7 +557,7 @@ impl App {
         branches
     }
 
-    fn ensure_selected_branch_visible(&mut self) -> bool {
+    fn ensure_selected_local_branch_visible(&mut self) -> bool {
         let local_branches = self.filtered_local_branches();
         if local_branches.is_empty() {
             let changed = self.selected_branch.is_some();
@@ -387,6 +577,29 @@ impl App {
         let selected = local_branches[0].name.clone();
         let changed = self.selected_branch.as_deref() != Some(selected.as_str());
         self.selected_branch = Some(selected);
+        changed
+    }
+
+    fn ensure_selected_remote_branch_visible(&mut self) -> bool {
+        let remote_branches = self.filtered_remote_branches();
+        if remote_branches.is_empty() {
+            let changed = self.selected_remote_branch.is_some();
+            self.selected_remote_branch = None;
+            return changed;
+        }
+
+        let selected_visible = self.selected_remote_branch.as_deref().and_then(|selected| {
+            remote_branches
+                .iter()
+                .position(|branch| branch.full_ref() == selected)
+        });
+        if selected_visible.is_some() {
+            return false;
+        }
+
+        let selected = remote_branches[0].full_ref();
+        let changed = self.selected_remote_branch.as_deref() != Some(selected.as_str());
+        self.selected_remote_branch = Some(selected);
         changed
     }
 
@@ -427,6 +640,35 @@ impl App {
         ACTIONS
     }
 
+    pub fn remote_branch_actions(&self) -> &'static [RemoteBranchAction] {
+        const ACTIONS: &[RemoteBranchAction] = &[
+            RemoteBranchAction::CreateLocalBranch,
+            RemoteBranchAction::CheckoutDetached,
+        ];
+        ACTIONS
+    }
+
+    pub fn move_remote_picker(&mut self, delta: isize) {
+        let count = self.remote_branch_actions().len();
+        if count == 0 {
+            return;
+        }
+
+        let next = if delta.is_negative() {
+            self.remote_picker_index
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            self.remote_picker_index.saturating_add(delta as usize)
+        };
+        self.remote_picker_index = next.min(count.saturating_sub(1));
+    }
+
+    pub fn selected_remote_action(&self) -> Option<RemoteBranchAction> {
+        self.remote_branch_actions()
+            .get(self.remote_picker_index)
+            .copied()
+    }
+
     pub fn start_loading(&mut self, label: impl Into<String>) {
         let label = label.into();
         self.loading = Some(label.clone());
@@ -457,7 +699,8 @@ impl App {
         self.graph = history.graph;
         self.selected_branch = selected_branch;
         self.selected_commit = self.selected_commit.min(self.log.len().saturating_sub(1));
-        let _ = self.ensure_selected_branch_visible();
+        let _ = self.ensure_selected_local_branch_visible();
+        let _ = self.ensure_selected_remote_branch_visible();
     }
 
     pub fn apply_graph_history(&mut self, history: BranchHistory) {
@@ -483,7 +726,12 @@ impl App {
         frame.render_widget(self.render_header(), header);
         frame.render_widget(self.render_status(), status_area);
         frame.render_widget(self.render_branch_search(), search_area);
-        frame.render_widget(self.render_remote_branches(), remote_area);
+        let mut remote_state = self.remote_branch_state();
+        frame.render_stateful_widget(
+            self.render_remote_branches(),
+            remote_area,
+            &mut remote_state,
+        );
         let mut branch_state = self.branch_state();
         frame.render_stateful_widget(self.render_local_branches(), local_area, &mut branch_state);
         let mut graph_state = self.graph_state();
@@ -499,6 +747,12 @@ impl App {
         if self.picker_open {
             let popup = self.render_picker();
             let area = layout::centered_rect(60, 50, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(popup, area);
+        }
+        if self.remote_picker_open {
+            let popup = self.render_remote_picker();
+            let area = layout::centered_rect(60, 42, frame.area());
             frame.render_widget(Clear, area);
             frame.render_widget(popup, area);
         }
@@ -584,61 +838,64 @@ impl App {
     }
 
     fn render_remote_branches(&self) -> List<'_> {
-        let catalog = build_branch_catalog(&self.branches);
-        let query = self.branch_filter.trim().to_ascii_lowercase();
-        let mut items = Vec::new();
-        let mut total = 0usize;
-        let mut groups = 0usize;
-
-        for group in catalog.remotes {
-            let group_matches = query.is_empty()
-                || group.remote.to_ascii_lowercase().contains(&query)
-                || group
-                    .branches
+        let branches = self.remote_branches();
+        let total = branches.len();
+        let selected = self
+            .selected_remote_branch
+            .as_deref()
+            .and_then(|selected| {
+                branches
                     .iter()
-                    .any(|branch| self.branch_filter_matches(branch));
-            if !group_matches {
-                continue;
-            }
-
-            groups = groups.saturating_add(1);
-            items.push(
-                ListItem::new(format!("{}:", group.remote)).style(
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            );
-
-            for branch in group.branches {
-                if !self.branch_filter_matches(&branch)
-                    && !group.remote.to_ascii_lowercase().contains(&query)
-                {
-                    continue;
-                }
-                total = total.saturating_add(1);
-                items.push(
-                    ListItem::new(format!("  {}", branch.branch_short_name()))
-                        .style(Style::default().fg(theme::TEXT)),
+                    .position(|branch| branch.full_ref() == selected)
+            })
+            .unwrap_or(0);
+        let items = branches
+            .into_iter()
+            .map(|branch| {
+                let marker = if branch.current { "●" } else { " " };
+                let text = format!(
+                    "{marker} {}/{}",
+                    branch.remote_name().unwrap_or("remote"),
+                    branch.branch_short_name()
                 );
-            }
-        }
+                let style = if branch.current {
+                    Style::default()
+                        .fg(theme::SUCCESS)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                };
 
-        if items.is_empty() {
-            items.push(ListItem::new(
+                ListItem::new(text).style(style)
+            })
+            .collect::<Vec<_>>();
+        let items = if items.is_empty() {
+            vec![ListItem::new(
                 "No remote branches match the current filter.",
-            ));
-        }
+            )]
+        } else {
+            items
+        };
 
-        List::new(items).block(
-            Block::default()
-                .title(format!(
-                    "Remote branches ({groups} remote(s), {total} ref(s))"
-                ))
-                .title_style(Style::default().fg(theme::PURPLE))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::PURPLE)),
-        )
+        List::new(items)
+            .highlight_style(
+                Style::default()
+                    .fg(theme::BG)
+                    .bg(theme::PURPLE)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ")
+            .block(
+                Block::default()
+                    .title(format!(
+                        "Remote branches ({}/{})",
+                        selected.saturating_add(1),
+                        total.max(1)
+                    ))
+                    .title_style(Style::default().fg(theme::PURPLE))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::PURPLE)),
+            )
     }
 
     fn render_local_branches(&self) -> List<'_> {
@@ -681,6 +938,11 @@ impl App {
                 ListItem::new(text).style(style)
             })
             .collect::<Vec<_>>();
+        let items = if items.is_empty() {
+            vec![ListItem::new("No local branches match the current filter.")]
+        } else {
+            items
+        };
 
         List::new(items)
             .highlight_style(
@@ -713,15 +975,7 @@ impl App {
         .into_iter()
         .map(ListItem::new)
         .collect::<Vec<_>>();
-        let title = output::render_graph_title(
-            self.selected_branch()
-                .map(|branch| branch.name.as_str())
-                .or_else(|| {
-                    self.status
-                        .as_ref()
-                        .map(|status| status.branch_name.as_str())
-                }),
-        );
+        let title = output::render_graph_title(self.selected_graph_label().as_deref());
 
         List::new(items)
             .block(
@@ -789,8 +1043,9 @@ impl App {
             format!(
                 "{}\n\nSearch filter:\n{}",
                 widgets::actions_copy(
-                    self.selected_branch().map(|b| b.name.as_str()),
+                    self.selected_graph_label().as_deref(),
                     self.sync_target_display().as_deref(),
+                    self.branch_panel,
                 ),
                 filter
             )
@@ -862,6 +1117,43 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::ACCENT)),
             )
+    }
+
+    fn render_remote_picker(&self) -> Paragraph<'_> {
+        let branch = self
+            .selected_remote_branch()
+            .map(|branch| branch.display_name())
+            .unwrap_or_else(|| String::from("unknown"));
+        let options = self
+            .remote_branch_actions()
+            .iter()
+            .enumerate()
+            .map(|(index, action)| {
+                let prefix = if index == self.remote_picker_index {
+                    "▶"
+                } else {
+                    " "
+                };
+                format!("{prefix} {}", action.label())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Paragraph::new(format!(
+            "Remote branch: {branch}\n\n{options}\n\nEnter = confirm • Esc = close"
+        ))
+        .style(Style::default().fg(theme::TEXT).bg(theme::SURFACE))
+        .block(
+            Block::default()
+                .title("Remote Branch Actions")
+                .title_style(
+                    Style::default()
+                        .fg(theme::PURPLE)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::PURPLE)),
+        )
     }
 
     fn render_branch_creator(&self) -> Paragraph<'_> {
@@ -938,11 +1230,29 @@ impl App {
         }
         state
     }
+
+    fn remote_branch_state(&self) -> ListState {
+        let mut state = ListState::default();
+        let branches = self.remote_branches();
+        if !branches.is_empty() {
+            let selected = self
+                .selected_remote_branch
+                .as_deref()
+                .and_then(|selected| {
+                    branches
+                        .iter()
+                        .position(|branch| branch.full_ref() == selected)
+                })
+                .unwrap_or(0);
+            state.select(Some(selected.min(branches.len().saturating_sub(1))));
+        }
+        state
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{App, CommitAction, MessageKind, PickerAction, View};
+    use super::{App, BranchPanel, CommitAction, MessageKind, PickerAction, View};
     use crate::domain::{BranchInfo, BranchKind, RepoStatus};
 
     #[test]
@@ -990,6 +1300,50 @@ mod tests {
 
         app.move_selection(-1);
         assert_eq!(app.selected_branch().unwrap().name, "main");
+    }
+
+    #[test]
+    fn remote_selection_moves_with_active_remote_panel() {
+        let mut app = App::new();
+        app.branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: Some("origin/main".to_string()),
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/feature/login".to_string(),
+                current: false,
+                upstream: None,
+                commit: "def".to_string(),
+                subject: "feature".to_string(),
+                kind: BranchKind::Remote,
+            },
+            BranchInfo {
+                name: "upstream/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+        app.set_branch_panel(BranchPanel::Remote);
+
+        app.move_selection(1);
+        assert_eq!(
+            app.selected_remote_branch().unwrap().full_ref(),
+            "refs/remotes/upstream/main"
+        );
+
+        app.move_selection(-1);
+        assert_eq!(
+            app.selected_remote_branch().unwrap().full_ref(),
+            "refs/remotes/origin/feature/login"
+        );
     }
 
     #[test]
@@ -1163,6 +1517,22 @@ mod tests {
         assert_eq!(
             app.branch_create_request(),
             Some(("feature/login".to_string(), "main".to_string()))
+        );
+    }
+
+    #[test]
+    fn branch_create_request_preserves_remote_source_ref() {
+        let mut app = App::new();
+        app.branch_create_open = true;
+        app.branch_create_source = Some("refs/remotes/origin/main".to_string());
+        app.branch_create_name = "release".to_string();
+
+        assert_eq!(
+            app.branch_create_request(),
+            Some((
+                "release".to_string(),
+                "refs/remotes/origin/main".to_string()
+            ))
         );
     }
 }

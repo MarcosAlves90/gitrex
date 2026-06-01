@@ -3,7 +3,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent};
 use crate::git::GitClient;
 
 use super::{
-    app::{App, CommitAction, MessageKind, PickerAction, View},
+    app::{App, BranchPanel, CommitAction, MessageKind, PickerAction, RemoteBranchAction, View},
     operations::{build_snapshot, GitOperationRunner, OperationOutcome, OperationRequest},
 };
 
@@ -41,6 +41,7 @@ impl TuiController {
             snapshot.history,
             snapshot.selected_branch,
         );
+        self.refresh_selected_branch_history()?;
         self.app
             .set_feedback("Repository refreshed.", MessageKind::Success);
         Ok(())
@@ -118,6 +119,16 @@ impl TuiController {
             .set_feedback(format!("{label}..."), MessageKind::Info);
         Ok(())
     }
+
+    fn start_detached_checkout(&mut self, target: String) -> anyhow::Result<()> {
+        let operation = OperationRequest::CheckoutDetached { target };
+        let label = operation.loading_label();
+        self.app.start_loading(label.clone());
+        self.operation_rx = Some(self.runner.spawn(operation));
+        self.app
+            .set_feedback(format!("{label}..."), MessageKind::Info);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +137,7 @@ enum Intent {
     Quit,
     Refresh,
     SelectView(View),
+    ToggleBranchPanel,
     MoveSelection(isize),
     MoveCommitSelection(isize),
     OpenBranchSearch,
@@ -134,12 +146,16 @@ enum Intent {
     TypeBranchSearchChar(char),
     ConfirmBranchSearch,
     OpenPicker,
+    OpenRemotePicker,
     ClosePicker,
+    CloseRemotePicker,
     OpenCommitActions,
     CloseCommitActions,
     MovePicker(isize),
+    MoveRemotePicker(isize),
     MoveCommitAction(isize),
     ConfirmPicker,
+    ConfirmRemotePicker,
     ConfirmCommitAction,
     CancelBranchCreate,
     DeleteBranchName,
@@ -179,6 +195,16 @@ impl TuiController {
             };
         }
 
+        if self.app.remote_picker_is_open() {
+            return match key.code {
+                KeyCode::Esc => Intent::CloseRemotePicker,
+                KeyCode::Enter => Intent::ConfirmRemotePicker,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MoveRemotePicker(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MoveRemotePicker(-1),
+                _ => Intent::None,
+            };
+        }
+
         if self.app.commit_actions_are_open() {
             return match key.code {
                 KeyCode::Esc => Intent::CloseCommitActions,
@@ -201,6 +227,10 @@ impl TuiController {
             KeyCode::Char('k') | KeyCode::Up if matches!(self.app.view, View::Branches) => {
                 Intent::MoveSelection(-1)
             }
+            KeyCode::Tab if matches!(self.app.view, View::Branches) => Intent::ToggleBranchPanel,
+            KeyCode::BackTab if matches!(self.app.view, View::Branches) => {
+                Intent::ToggleBranchPanel
+            }
             KeyCode::Char('j') | KeyCode::Down if matches!(self.app.view, View::Log) => {
                 Intent::MoveCommitSelection(1)
             }
@@ -210,7 +240,12 @@ impl TuiController {
             KeyCode::Char('/') if matches!(self.app.view, View::Branches) => {
                 Intent::OpenBranchSearch
             }
-            KeyCode::Enter if matches!(self.app.view, View::Branches) => Intent::OpenPicker,
+            KeyCode::Enter if matches!(self.app.view, View::Branches) => {
+                match self.app.branch_panel() {
+                    BranchPanel::Local => Intent::OpenPicker,
+                    BranchPanel::Remote => Intent::OpenRemotePicker,
+                }
+            }
             KeyCode::Enter if matches!(self.app.view, View::Log) => Intent::OpenCommitActions,
             _ => Intent::None,
         }
@@ -226,6 +261,11 @@ impl TuiController {
             }
             Intent::SelectView(view) => {
                 self.app.select_view(view);
+                Ok(false)
+            }
+            Intent::ToggleBranchPanel => {
+                self.app.toggle_branch_panel();
+                self.refresh_selected_branch_history()?;
                 Ok(false)
             }
             Intent::MoveSelection(delta) => {
@@ -263,8 +303,16 @@ impl TuiController {
                 self.app.open_picker();
                 Ok(false)
             }
+            Intent::OpenRemotePicker => {
+                self.app.open_remote_picker();
+                Ok(false)
+            }
             Intent::ClosePicker => {
                 self.app.close_picker();
+                Ok(false)
+            }
+            Intent::CloseRemotePicker => {
+                self.app.close_remote_picker();
                 Ok(false)
             }
             Intent::OpenCommitActions => {
@@ -279,12 +327,20 @@ impl TuiController {
                 self.app.move_picker(delta);
                 Ok(false)
             }
+            Intent::MoveRemotePicker(delta) => {
+                self.app.move_remote_picker(delta);
+                Ok(false)
+            }
             Intent::MoveCommitAction(delta) => {
                 self.app.move_commit_action(delta);
                 Ok(false)
             }
             Intent::ConfirmPicker => {
                 self.confirm_picker()?;
+                Ok(false)
+            }
+            Intent::ConfirmRemotePicker => {
+                self.confirm_remote_picker()?;
                 Ok(false)
             }
             Intent::ConfirmCommitAction => {
@@ -323,6 +379,28 @@ impl TuiController {
                 Ok(())
             }
             _ => self.start_operation(action),
+        }
+    }
+
+    fn confirm_remote_picker(&mut self) -> anyhow::Result<()> {
+        let action = self
+            .app
+            .selected_remote_action()
+            .unwrap_or(RemoteBranchAction::CreateLocalBranch);
+        self.app.close_remote_picker();
+
+        let Some(branch) = self.app.selected_remote_branch() else {
+            self.app
+                .set_feedback("No remote branch selected.", MessageKind::Warning);
+            return Ok(());
+        };
+
+        match action {
+            RemoteBranchAction::CreateLocalBranch => {
+                self.app.open_branch_creator_from_source(branch.full_ref());
+                Ok(())
+            }
+            RemoteBranchAction::CheckoutDetached => self.start_detached_checkout(branch.full_ref()),
         }
     }
 
@@ -404,13 +482,18 @@ impl TuiController {
     }
 
     fn refresh_selected_branch_history(&mut self) -> anyhow::Result<()> {
-        let Some(branch) = self.app.selected_branch().map(|branch| branch.name.clone()) else {
+        let Some(reference) = self.app.selected_graph_ref().or_else(|| {
+            self.app
+                .status
+                .as_ref()
+                .map(|status| status.branch_name.clone())
+        }) else {
             return Ok(());
         };
 
         let history = self
             .client
-            .history_for_ref(&branch)
+            .history_for_ref(&reference)
             .map_err(anyhow::Error::msg)?;
         self.app.apply_graph_history(history);
         Ok(())
@@ -426,6 +509,7 @@ impl TuiController {
                     snapshot.history,
                     snapshot.selected_branch,
                 );
+                self.refresh_selected_branch_history()?;
                 self.app.set_feedback(message, MessageKind::Success);
             }
             OperationOutcome::Error(message) => {
@@ -454,10 +538,22 @@ mod tests {
     fn controller_routes_enter_to_picker_opening_and_log_actions() {
         let mut controller = TuiController::new(GitClient::new());
         controller.app_mut().select_view(View::Branches);
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Local);
 
         assert!(matches!(
             controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Intent::OpenPicker
+        ));
+
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Remote);
+
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Intent::OpenRemotePicker
         ));
 
         controller.app_mut().select_view(View::Log);
@@ -465,6 +561,21 @@ mod tests {
         assert!(matches!(
             controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Intent::OpenCommitActions
+        ));
+    }
+
+    #[test]
+    fn controller_routes_tab_between_branch_panels() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().select_view(View::Branches);
+
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Intent::ToggleBranchPanel
+        ));
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Intent::ToggleBranchPanel
         ));
     }
 
@@ -547,6 +658,114 @@ mod tests {
             controller.app().branch_create_source.as_deref(),
             Some("main")
         );
+    }
+
+    #[test]
+    fn controller_opens_branch_creator_from_remote_branch() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: Some("origin/main".to_string()),
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Remote);
+        controller.app_mut().selected_remote_branch = Some("refs/remotes/origin/main".to_string());
+        controller.app_mut().open_remote_picker();
+
+        controller.app_mut().remote_picker_index = 0;
+        controller.confirm_remote_picker().unwrap();
+
+        assert!(controller.app().branch_create_is_open());
+        assert_eq!(
+            controller.app().branch_create_source.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+    }
+
+    #[test]
+    fn controller_remote_selection_refreshes_graph_for_remote_ref() {
+        let _guard = current_dir_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        commit_all(&repo, "base commit");
+        create_branch(&repo, "feature/login", "HEAD");
+        checkout_branch(&repo, "feature/login");
+        write_file(temp.path(), "README.md", "feature work\n");
+        let feature_oid = commit_all(&repo, "feature work");
+        repo.reference(
+            "refs/remotes/origin/feature/login",
+            feature_oid,
+            true,
+            "set remote ref",
+        )
+        .unwrap();
+        checkout_branch(&repo, "main");
+        let _restore = CurrentDirGuard::push(temp.path());
+
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: Some("origin/main".to_string()),
+                commit: "main".to_string(),
+                subject: "main".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "main".to_string(),
+                subject: "main".to_string(),
+                kind: BranchKind::Remote,
+            },
+            BranchInfo {
+                name: "origin/feature/login".to_string(),
+                current: false,
+                upstream: None,
+                commit: "feature".to_string(),
+                subject: "feature".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Remote);
+        controller.app_mut().selected_remote_branch =
+            Some("refs/remotes/origin/feature/login".to_string());
+
+        controller.refresh_selected_branch_history().unwrap();
+
+        assert!(controller
+            .app()
+            .log
+            .iter()
+            .any(|entry| entry.subject == "feature work"));
+        assert!(!controller
+            .app()
+            .log
+            .iter()
+            .any(|entry| entry.subject == "main work"));
     }
 
     #[test]

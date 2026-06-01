@@ -11,6 +11,9 @@ pub enum OperationRequest {
     Checkout {
         branch: String,
     },
+    CheckoutDetached {
+        target: String,
+    },
     Switch {
         branch: String,
     },
@@ -32,6 +35,9 @@ impl OperationRequest {
     pub fn loading_label(&self) -> String {
         match self {
             OperationRequest::Checkout { branch } => format!("Checking out {branch}"),
+            OperationRequest::CheckoutDetached { target } => {
+                format!("Checking out detached HEAD at {target}")
+            }
             OperationRequest::Switch { branch } => format!("Switching to {branch}"),
             OperationRequest::CreateBranch {
                 branch,
@@ -52,6 +58,9 @@ impl OperationRequest {
     pub fn success_label(&self) -> String {
         match self {
             OperationRequest::Checkout { branch } => format!("Checked out {branch}"),
+            OperationRequest::CheckoutDetached { target } => {
+                format!("Checked out detached HEAD at {target}")
+            }
             OperationRequest::Switch { branch } => format!("Switched to {branch}"),
             OperationRequest::CreateBranch {
                 branch,
@@ -151,6 +160,9 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
         OperationRequest::Checkout { branch } => client
             .checkout(&branch)
             .map(|_| format!("Checked out {branch}")),
+        OperationRequest::CheckoutDetached { target } => client
+            .checkout(&target)
+            .map(|_| format!("Checked out detached HEAD at {target}")),
         OperationRequest::Switch { branch } => client
             .switch(&branch)
             .map(|_| format!("Switched to {branch}")),
@@ -214,6 +226,13 @@ mod tests {
             }
             .loading_label(),
             "Creating feature/login from main"
+        );
+        assert_eq!(
+            OperationRequest::CheckoutDetached {
+                target: "refs/remotes/origin/main".into()
+            }
+            .loading_label(),
+            "Checking out detached HEAD at refs/remotes/origin/main"
         );
     }
 

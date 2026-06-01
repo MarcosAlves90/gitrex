@@ -48,6 +48,17 @@ impl BranchInfo {
             self.name.clone()
         }
     }
+
+    pub fn full_ref(&self) -> String {
+        if self.is_remote() {
+            match self.remote_name() {
+                Some(remote) => format!("refs/remotes/{remote}/{}", self.branch_short_name()),
+                None => self.name.clone(),
+            }
+        } else {
+            format!("refs/heads/{}", self.name)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
