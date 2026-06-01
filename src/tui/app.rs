@@ -478,7 +478,7 @@ impl App {
             return;
         };
 
-        self.open_branch_creator_from_source(source, theme::ACCENT);
+        self.open_branch_creator_from_source(source, theme::SUCCESS);
     }
 
     pub fn open_branch_creator_from_source(
@@ -1180,7 +1180,7 @@ impl App {
 
     fn render_picker(&self) -> Paragraph<'_> {
         let active = matches!(self.branch_panel, BranchPanel::Local);
-        let border_color = theme::ACCENT;
+        let border_color = theme::SUCCESS;
         let branch = self
             .selected_branch()
             .map(|branch| branch.name.as_str())
@@ -1218,7 +1218,7 @@ impl App {
 
     fn render_remote_picker(&self) -> Paragraph<'_> {
         let active = matches!(self.branch_panel, BranchPanel::Remote);
-        let border_color = theme::PINK;
+        let border_color = theme::TEAL;
         let branch = self
             .selected_remote_branch()
             .map(|branch| branch.display_name())
@@ -1609,6 +1609,7 @@ mod tests {
 
         assert!(app.branch_create_is_open());
         assert_eq!(app.branch_create_source.as_deref(), Some("main"));
+        assert_eq!(app.branch_create_accent, theme::SUCCESS);
         assert!(app.branch_create_name.is_empty());
     }
 

@@ -12,7 +12,6 @@ pub const ACTIONS: Color = WARNING;
 pub const ERROR: Color = Color::Rgb(255, 64, 64);
 pub const PURPLE: Color = Color::Rgb(186, 85, 255);
 pub const TEAL: Color = Color::Rgb(0, 220, 200);
-pub const PINK: Color = Color::Rgb(255, 90, 180);
 
 pub fn panel_title_style(active: bool, accent: Color) -> Style {
     let mut style = Style::default().fg(if active { accent } else { MUTED });
