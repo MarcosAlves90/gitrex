@@ -3,8 +3,12 @@ use crossterm::event::{Event, KeyCode, KeyEvent};
 use crate::git::GitClient;
 
 use super::{
-    app::{App, BranchPanel, CommitAction, MessageKind, PickerAction, RemoteBranchAction, View},
-    operations::{build_snapshot, GitOperationRunner, OperationOutcome, OperationRequest},
+    app::{
+        App, BranchPanel, CommitAction, DeleteBranchTarget, MessageKind, PickerAction,
+        RemoteBranchAction, View,
+    },
+    operation_flow,
+    operations::{GitOperationRunner, OperationOutcome, OperationRequest},
 };
 
 pub struct TuiController {
@@ -25,6 +29,7 @@ impl TuiController {
         }
     }
 
+    #[cfg(test)]
     pub fn app(&self) -> &App {
         &self.app
     }
@@ -34,14 +39,8 @@ impl TuiController {
     }
 
     pub fn refresh(&mut self) -> anyhow::Result<()> {
-        let snapshot = build_snapshot(&self.client).map_err(anyhow::Error::msg)?;
-        self.app.apply_snapshot(
-            snapshot.status.unwrap(),
-            snapshot.branches,
-            snapshot.history,
-            snapshot.selected_branch,
-        );
-        self.refresh_selected_branch_history()?;
+        let snapshot = self.client.snapshot().map_err(anyhow::Error::msg)?;
+        self.app.apply_snapshot(snapshot);
         self.app
             .set_feedback("Repository refreshed.", MessageKind::Success);
         Ok(())
@@ -55,7 +54,7 @@ impl TuiController {
         match rx.try_recv() {
             Ok(outcome) => {
                 self.operation_rx = None;
-                self.finish_operation(outcome)
+                operation_flow::finish_operation(&mut self.app, outcome)
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(()),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -81,23 +80,15 @@ impl TuiController {
     }
 
     pub fn tick(&mut self) {
+        self.app.advance_loading_frame();
         if matches!(self.app.view, View::Log) {
             self.app.advance_graph_scroll();
         }
     }
 
     pub fn start_operation(&mut self, action: PickerAction) -> anyhow::Result<()> {
-        if self.operation_rx.is_some() {
-            return Ok(());
-        }
-
         let operation = self.build_operation(action)?;
-        let label = operation.loading_label();
-        self.app.start_loading(label.clone());
-        self.operation_rx = Some(self.runner.spawn(operation));
-        self.app
-            .set_feedback(format!("{label}..."), MessageKind::Info);
-        Ok(())
+        self.start_operation_request(operation)
     }
 
     fn start_branch_creation(&mut self) -> anyhow::Result<()> {
@@ -111,22 +102,14 @@ impl TuiController {
             branch,
             start_point,
         };
-        let label = operation.loading_label();
         self.app.close_branch_creator();
-        self.app.start_loading(label.clone());
-        self.operation_rx = Some(self.runner.spawn(operation));
-        self.app
-            .set_feedback(format!("{label}..."), MessageKind::Info);
+        self.start_operation_request(operation)?;
         Ok(())
     }
 
     fn start_detached_checkout(&mut self, target: String) -> anyhow::Result<()> {
         let operation = OperationRequest::CheckoutDetached { target };
-        let label = operation.loading_label();
-        self.app.start_loading(label.clone());
-        self.operation_rx = Some(self.runner.spawn(operation));
-        self.app
-            .set_feedback(format!("{label}..."), MessageKind::Info);
+        self.start_operation_request(operation)?;
         Ok(())
     }
 }
@@ -140,6 +123,7 @@ enum Intent {
     ToggleBranchPanel,
     MoveSelection(isize),
     MoveCommitSelection(isize),
+    MoveHelpScroll(isize),
     OpenBranchSearch,
     CloseBranchSearch,
     DeleteBranchSearchChar,
@@ -157,6 +141,10 @@ enum Intent {
     ConfirmPicker,
     ConfirmRemotePicker,
     ConfirmCommitAction,
+    ConfirmDeleteBranch,
+    CancelDeleteBranch,
+    OpenHelp,
+    CloseHelp,
     CancelBranchCreate,
     DeleteBranchName,
     TypeBranchName(char),
@@ -165,6 +153,24 @@ enum Intent {
 
 impl TuiController {
     fn intent_for_key(&self, key: KeyEvent) -> Intent {
+        if self.app.help_is_open() {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Char('h') => Intent::CloseHelp,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MoveHelpScroll(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MoveHelpScroll(-1),
+                KeyCode::Char('q') => Intent::Quit,
+                _ => Intent::None,
+            };
+        }
+
+        if self.app.delete_branch_confirm_is_open() {
+            return match key.code {
+                KeyCode::Esc => Intent::CancelDeleteBranch,
+                KeyCode::Enter => Intent::ConfirmDeleteBranch,
+                _ => Intent::None,
+            };
+        }
+
         if self.app.branch_create_is_open() {
             return match key.code {
                 KeyCode::Esc => Intent::CancelBranchCreate,
@@ -240,6 +246,7 @@ impl TuiController {
             KeyCode::Char('/') if matches!(self.app.view, View::Branches) => {
                 Intent::OpenBranchSearch
             }
+            KeyCode::Char('h') => Intent::OpenHelp,
             KeyCode::Enter if matches!(self.app.view, View::Branches) => {
                 match self.app.branch_panel() {
                     BranchPanel::Local => Intent::OpenPicker,
@@ -265,16 +272,28 @@ impl TuiController {
             }
             Intent::ToggleBranchPanel => {
                 self.app.toggle_branch_panel();
-                self.refresh_selected_branch_history()?;
+                if let Some(history) =
+                    operation_flow::refresh_selected_branch_history(&self.app, &self.client)?
+                {
+                    self.app.apply_graph_history(history);
+                }
                 Ok(false)
             }
             Intent::MoveSelection(delta) => {
                 self.app.move_selection(delta);
-                self.refresh_selected_branch_history()?;
+                if let Some(history) =
+                    operation_flow::refresh_selected_branch_history(&self.app, &self.client)?
+                {
+                    self.app.apply_graph_history(history);
+                }
                 Ok(false)
             }
             Intent::MoveCommitSelection(delta) => {
                 self.app.move_commit_selection(delta);
+                Ok(false)
+            }
+            Intent::MoveHelpScroll(delta) => {
+                self.app.move_help_scroll(delta);
                 Ok(false)
             }
             Intent::OpenBranchSearch => {
@@ -295,7 +314,11 @@ impl TuiController {
             }
             Intent::ConfirmBranchSearch => {
                 if self.app.confirm_branch_search() {
-                    self.refresh_selected_branch_history()?;
+                    if let Some(history) =
+                        operation_flow::refresh_selected_branch_history(&self.app, &self.client)?
+                    {
+                        self.app.apply_graph_history(history);
+                    }
                 }
                 Ok(false)
             }
@@ -347,6 +370,22 @@ impl TuiController {
                 self.confirm_commit_action()?;
                 Ok(false)
             }
+            Intent::ConfirmDeleteBranch => {
+                self.confirm_delete_branch()?;
+                Ok(false)
+            }
+            Intent::CancelDeleteBranch => {
+                self.app.close_delete_branch_confirm();
+                Ok(false)
+            }
+            Intent::OpenHelp => {
+                self.app.open_help();
+                Ok(false)
+            }
+            Intent::CloseHelp => {
+                self.app.close_help();
+                Ok(false)
+            }
             Intent::CancelBranchCreate => {
                 self.app.close_branch_creator();
                 Ok(false)
@@ -378,6 +417,16 @@ impl TuiController {
                 self.app.open_branch_creator();
                 Ok(())
             }
+            PickerAction::DeleteBranch => {
+                let branch = self
+                    .app
+                    .selected_branch()
+                    .map(|branch| branch.name.clone())
+                    .ok_or_else(|| anyhow::anyhow!("No branch selected."))?;
+                self.app
+                    .open_delete_branch_confirm(DeleteBranchTarget::Local { branch });
+                Ok(())
+            }
             _ => self.start_operation(action),
         }
     }
@@ -399,6 +448,14 @@ impl TuiController {
             RemoteBranchAction::CreateLocalBranch => {
                 self.app
                     .open_branch_creator_from_source(branch.full_ref(), crate::tui::theme::TEAL);
+                Ok(())
+            }
+            RemoteBranchAction::DeleteRemoteBranch => {
+                self.app
+                    .open_delete_branch_confirm(DeleteBranchTarget::Remote {
+                        remote: branch.remote_name().unwrap_or("remote").to_string(),
+                        branch: branch.branch_short_name().to_string(),
+                    });
                 Ok(())
             }
             RemoteBranchAction::CheckoutDetached => self.start_detached_checkout(branch.full_ref()),
@@ -432,6 +489,22 @@ impl TuiController {
                     .open_branch_creator_from_source(source, crate::tui::theme::PURPLE);
                 Ok(())
             }
+        }
+    }
+
+    fn confirm_delete_branch(&mut self) -> anyhow::Result<()> {
+        let target = self
+            .app
+            .delete_branch_target()
+            .ok_or_else(|| anyhow::anyhow!("No branch selected."))?;
+        self.app.close_delete_branch_confirm();
+
+        match target {
+            DeleteBranchTarget::Local { branch } => {
+                self.start_operation_request(OperationRequest::DeleteLocalBranch { branch })
+            }
+            DeleteBranchTarget::Remote { remote, branch } => self
+                .start_operation_request(OperationRequest::DeleteRemoteBranch { remote, branch }),
         }
     }
 
@@ -470,53 +543,33 @@ impl TuiController {
             PickerAction::CreateBranch => Err(anyhow::anyhow!(
                 "Create branch is handled through the input prompt."
             )),
+            PickerAction::DeleteBranch => Err(anyhow::anyhow!(
+                "Delete branch is handled through the confirmation dialog."
+            )),
         }
     }
 
     fn start_operation_from_target(&mut self, target: String) -> anyhow::Result<()> {
         let operation = OperationRequest::Checkout { branch: target };
-        let label = operation.loading_label();
-        self.app.start_loading(label.clone());
-        self.operation_rx = Some(self.runner.spawn(operation));
-        self.app
-            .set_feedback(format!("{label}..."), MessageKind::Info);
+        self.start_operation_request(operation)
+    }
+
+    fn start_operation_request(&mut self, operation: OperationRequest) -> anyhow::Result<()> {
+        operation_flow::begin_operation(
+            &mut self.app,
+            &self.runner,
+            &mut self.operation_rx,
+            operation,
+        );
         Ok(())
     }
 
+    #[cfg(test)]
     fn refresh_selected_branch_history(&mut self) -> anyhow::Result<()> {
-        let Some(reference) = self.app.selected_graph_ref().or_else(|| {
-            self.app
-                .status
-                .as_ref()
-                .map(|status| status.branch_name.clone())
-        }) else {
-            return Ok(());
-        };
-
-        let history = self
-            .client
-            .history_for_ref(&reference)
-            .map_err(anyhow::Error::msg)?;
-        self.app.apply_graph_history(history);
-        Ok(())
-    }
-
-    fn finish_operation(&mut self, outcome: OperationOutcome) -> anyhow::Result<()> {
-        self.app.stop_loading();
-        match outcome {
-            OperationOutcome::Success { snapshot, message } => {
-                self.app.apply_snapshot(
-                    snapshot.status.unwrap(),
-                    snapshot.branches,
-                    snapshot.history,
-                    snapshot.selected_branch,
-                );
-                self.refresh_selected_branch_history()?;
-                self.app.set_feedback(message, MessageKind::Success);
-            }
-            OperationOutcome::Error(message) => {
-                self.app.set_feedback(message, MessageKind::Error);
-            }
+        if let Some(history) =
+            operation_flow::refresh_selected_branch_history(&self.app, &self.client)?
+        {
+            self.app.apply_graph_history(history);
         }
         Ok(())
     }
@@ -524,7 +577,7 @@ impl TuiController {
 
 #[cfg(test)]
 mod tests {
-    use super::{Intent, TuiController, View};
+    use super::{DeleteBranchTarget, Intent, TuiController, View};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     use crate::test_support::{
@@ -567,6 +620,50 @@ mod tests {
     }
 
     #[test]
+    fn controller_routes_h_to_help_and_close_it() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().select_view(View::Branches);
+
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Intent::OpenHelp
+        ));
+
+        controller.app_mut().open_help();
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Intent::CloseHelp
+        ));
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Intent::CloseHelp
+        ));
+    }
+
+    #[test]
+    fn controller_routes_scroll_keys_in_help() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().open_help();
+
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Intent::MoveHelpScroll(1)
+        ));
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Intent::MoveHelpScroll(1)
+        ));
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Intent::MoveHelpScroll(-1)
+        ));
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            Intent::MoveHelpScroll(-1)
+        ));
+    }
+
+    #[test]
     fn controller_routes_tab_between_branch_panels() {
         let mut controller = TuiController::new(GitClient::new());
         controller.app_mut().select_view(View::Branches);
@@ -593,6 +690,25 @@ mod tests {
         assert!(matches!(
             controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Intent::ConfirmBranchSearch
+        ));
+    }
+
+    #[test]
+    fn controller_routes_confirmation_keys_when_delete_dialog_is_open() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller
+            .app_mut()
+            .open_delete_branch_confirm(DeleteBranchTarget::Local {
+                branch: "main".to_string(),
+            });
+
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Intent::ConfirmDeleteBranch
+        ));
+        assert!(matches!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Intent::CancelDeleteBranch
         ));
     }
 
@@ -660,7 +776,36 @@ mod tests {
             controller.app().branch_create_source.as_deref(),
             Some("main")
         );
-        assert_eq!(controller.app().branch_create_accent, crate::tui::theme::SUCCESS);
+        assert_eq!(
+            controller.app().branch_create_accent,
+            crate::tui::theme::SUCCESS
+        );
+    }
+
+    #[test]
+    fn controller_opens_delete_confirmation_from_picker_action() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().branches = vec![BranchInfo {
+            name: "main".to_string(),
+            current: true,
+            upstream: None,
+            commit: "abc".to_string(),
+            subject: "init".to_string(),
+            kind: BranchKind::Local,
+        }];
+        controller.app_mut().selected_branch = Some("main".to_string());
+        controller.app_mut().open_picker();
+        controller.app_mut().picker_index = 5;
+
+        controller.confirm_picker().unwrap();
+
+        assert!(controller.app().delete_branch_confirm_is_open());
+        assert_eq!(
+            controller.app().delete_branch_target(),
+            Some(DeleteBranchTarget::Local {
+                branch: "main".to_string()
+            })
+        );
     }
 
     #[test]
@@ -698,7 +843,50 @@ mod tests {
             controller.app().branch_create_source.as_deref(),
             Some("refs/remotes/origin/main")
         );
-        assert_eq!(controller.app().branch_create_accent, crate::tui::theme::TEAL);
+        assert_eq!(
+            controller.app().branch_create_accent,
+            crate::tui::theme::TEAL
+        );
+    }
+
+    #[test]
+    fn controller_opens_delete_confirmation_from_remote_branch() {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: Some("origin/main".to_string()),
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "abc".to_string(),
+                subject: "init".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Remote);
+        controller.app_mut().selected_remote_branch = Some("refs/remotes/origin/main".to_string());
+        controller.app_mut().open_remote_picker();
+
+        controller.app_mut().remote_picker_index = 2;
+        controller.confirm_remote_picker().unwrap();
+
+        assert!(controller.app().delete_branch_confirm_is_open());
+        assert_eq!(
+            controller.app().delete_branch_target(),
+            Some(DeleteBranchTarget::Remote {
+                remote: "origin".to_string(),
+                branch: "main".to_string()
+            })
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use assert_cmd::Command as AssertCommand;
+use predicates::prelude::PredicateBooleanExt;
 use tempfile::TempDir;
 
 use gitrex::test_support::{
@@ -179,6 +180,53 @@ fn cli_can_push_and_pull_with_a_real_remote() {
     assert!(origin_repo
         .find_reference("refs/heads/feature/login")
         .is_ok());
+}
+
+#[test]
+fn cli_branch_refresh_removes_deleted_remote_refs() {
+    let _guard = current_dir_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let temp = TempDir::new().unwrap();
+    let seed = temp.path().join("seed");
+    let origin = temp.path().join("origin.git");
+    let worktree = temp.path().join("worktree");
+
+    let seed_repo = init_repo(&seed, "main");
+    configure_user(&seed_repo);
+    write_file(&seed, "README.md", "base\n");
+    commit_all(&seed_repo, "base");
+
+    let origin_repo = clone_bare_repo(&seed, &origin);
+    set_remote_head(&origin_repo, "refs/heads/main");
+
+    let worktree_repo = clone_repo(&origin, &worktree);
+    configure_user(&worktree_repo);
+    set_upstream(&worktree_repo, "main", "origin/main");
+
+    write_file(&worktree, "feature.txt", "feature\n");
+    commit_all(&worktree_repo, "feature work");
+    create_branch(&worktree_repo, "feature/login", "HEAD");
+    push_branch(&worktree_repo, "origin", "feature/login");
+
+    let _cwd = CurrentDirGuard::push(&worktree);
+
+    assert_gitrex(&worktree, &["branch"])
+        .success()
+        .stdout(predicates::str::contains("origin/feature/login"));
+
+    let mut remote_feature = origin_repo
+        .find_reference("refs/heads/feature/login")
+        .unwrap();
+    remote_feature.delete().unwrap();
+
+    assert_gitrex(&worktree, &["branch"])
+        .success()
+        .stdout(predicates::str::contains("remote branches:"))
+        .stdout(predicates::str::contains("local branches:"))
+        .stdout(predicates::str::contains("feature/login [local-only]"))
+        .stdout(predicates::str::contains("origin/feature/login").not());
 }
 
 fn assert_gitrex(dir: &std::path::Path, args: &[&str]) -> assert_cmd::assert::Assert {

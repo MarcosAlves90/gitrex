@@ -1,10 +1,7 @@
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use crate::{
-    domain::{BranchHistory, BranchInfo, RepoStatus},
-    git::GitClient,
-};
+use crate::{domain::RepoSnapshot, git::GitClient};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationRequest {
@@ -20,6 +17,13 @@ pub enum OperationRequest {
     CreateBranch {
         branch: String,
         start_point: String,
+    },
+    DeleteLocalBranch {
+        branch: String,
+    },
+    DeleteRemoteBranch {
+        remote: String,
+        branch: String,
     },
     Pull {
         remote: Option<String>,
@@ -45,6 +49,12 @@ impl OperationRequest {
             } => {
                 format!("Creating {branch} from {start_point}")
             }
+            OperationRequest::DeleteLocalBranch { branch } => {
+                format!("Deleting local branch {branch}")
+            }
+            OperationRequest::DeleteRemoteBranch { remote, branch } => {
+                format!("Deleting remote branch {remote}/{branch}")
+            }
             OperationRequest::Pull { remote, branch }
             | OperationRequest::Push { remote, branch } => {
                 match (remote.as_deref(), branch.as_deref()) {
@@ -68,6 +78,12 @@ impl OperationRequest {
             } => {
                 format!("Created {branch} from {start_point}")
             }
+            OperationRequest::DeleteLocalBranch { branch } => {
+                format!("Deleted local branch {branch}")
+            }
+            OperationRequest::DeleteRemoteBranch { remote, branch } => {
+                format!("Deleted remote branch {remote}/{branch}")
+            }
             OperationRequest::Pull { remote, branch } => {
                 match (remote.as_deref(), branch.as_deref()) {
                     (Some(remote), Some(branch)) => format!("Pulled {remote}/{branch}"),
@@ -82,14 +98,6 @@ impl OperationRequest {
             }
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct RepoSnapshot {
-    pub status: Option<RepoStatus>,
-    pub branches: Vec<BranchInfo>,
-    pub history: BranchHistory,
-    pub selected_branch: Option<String>,
 }
 
 #[derive(Debug)]
@@ -124,36 +132,6 @@ impl GitOperationRunner {
     }
 }
 
-pub fn build_snapshot(client: &GitClient) -> Result<RepoSnapshot, String> {
-    let status = client.status().map_err(|error| error.to_string())?;
-    let branches = client.branches().map_err(|error| error.to_string())?;
-    let selected_branch = branches
-        .iter()
-        .position(|branch| {
-            branch.current && matches!(branch.kind, crate::domain::BranchKind::Local)
-        })
-        .or_else(|| {
-            branches.iter().position(|branch| {
-                matches!(branch.kind, crate::domain::BranchKind::Local)
-                    && branch.name == status.branch_name
-            })
-        })
-        .and_then(|index| branches.get(index).map(|branch| branch.name.clone()));
-    let graph_ref = selected_branch
-        .as_deref()
-        .unwrap_or(status.branch_name.as_str());
-    let history = client
-        .history_for_ref(graph_ref)
-        .map_err(|error| error.to_string())?;
-
-    Ok(RepoSnapshot {
-        status: Some(status),
-        branches,
-        history,
-        selected_branch,
-    })
-}
-
 fn execute_operation(client: GitClient, request: OperationRequest) -> OperationOutcome {
     let success_message = request.success_label();
     let result = match request {
@@ -172,6 +150,12 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
         } => client
             .create_branch(&branch, Some(&start_point))
             .map(|_| format!("Created {branch} from {start_point}")),
+        OperationRequest::DeleteLocalBranch { branch } => client
+            .delete_local_branch(&branch)
+            .map(|_| format!("Deleted local branch {branch}")),
+        OperationRequest::DeleteRemoteBranch { remote, branch } => client
+            .delete_remote_branch(&remote, &branch)
+            .map(|_| format!("Deleted remote branch {remote}/{branch}")),
         OperationRequest::Pull { remote, branch } => client
             .pull(remote.as_deref(), branch.as_deref())
             .map(|_| String::from("Pull complete.")),
@@ -181,12 +165,12 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
     };
 
     match result {
-        Ok(_) => match build_snapshot(&client) {
+        Ok(_) => match client.snapshot() {
             Ok(snapshot) => OperationOutcome::Success {
                 snapshot,
                 message: success_message,
             },
-            Err(error) => OperationOutcome::Error(error),
+            Err(error) => OperationOutcome::Error(error.to_string()),
         },
         Err(error) => OperationOutcome::Error(error.to_string()),
     }
@@ -194,7 +178,7 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
 
 #[cfg(test)]
 mod tests {
-    use super::{build_snapshot, OperationRequest};
+    use super::OperationRequest;
     use crate::git::GitClient;
     use crate::test_support::{
         checkout_branch, commit_all, configure_user, create_branch, current_dir_lock, init_repo,
@@ -228,6 +212,21 @@ mod tests {
             "Creating feature/login from main"
         );
         assert_eq!(
+            OperationRequest::DeleteLocalBranch {
+                branch: "feature/login".into()
+            }
+            .loading_label(),
+            "Deleting local branch feature/login"
+        );
+        assert_eq!(
+            OperationRequest::DeleteRemoteBranch {
+                remote: "origin".into(),
+                branch: "feature/login".into()
+            }
+            .success_label(),
+            "Deleted remote branch origin/feature/login"
+        );
+        assert_eq!(
             OperationRequest::CheckoutDetached {
                 target: "refs/remotes/origin/main".into()
             }
@@ -251,7 +250,7 @@ mod tests {
         let _restore = CurrentDirGuard::push(temp.path());
 
         let client = GitClient::new();
-        let snapshot = build_snapshot(&client).unwrap();
+        let snapshot = client.snapshot().unwrap();
 
         assert!(snapshot.history.commits.len() > 12);
     }
@@ -276,7 +275,7 @@ mod tests {
         let _restore = CurrentDirGuard::push(temp.path());
 
         let client = GitClient::new();
-        let snapshot = build_snapshot(&client).unwrap();
+        let snapshot = client.snapshot().unwrap();
 
         assert!(snapshot
             .history
