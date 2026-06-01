@@ -1063,6 +1063,7 @@ impl App {
             self.selected_commit,
             self.graph_scroll_offset,
             width,
+            active,
         )
         .into_iter()
         .map(ListItem::new)
