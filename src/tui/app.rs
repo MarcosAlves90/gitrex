@@ -192,6 +192,14 @@ impl App {
         self.branch_panel
     }
 
+    pub fn local_branch_panel_is_active(&self) -> bool {
+        matches!(self.view, View::Branches) && matches!(self.branch_panel, BranchPanel::Local)
+    }
+
+    pub fn remote_branch_panel_is_active(&self) -> bool {
+        matches!(self.view, View::Branches) && matches!(self.branch_panel, BranchPanel::Remote)
+    }
+
     pub fn set_branch_panel(&mut self, panel: BranchPanel) {
         self.branch_panel = panel;
         self.ensure_active_branch_selection_visible();
@@ -830,7 +838,7 @@ impl App {
                     "local",
                     Style::default()
                         .fg(if local_active {
-                            theme::ACCENT
+                            theme::SUCCESS
                         } else {
                             theme::MUTED
                         })
@@ -849,7 +857,7 @@ impl App {
                     "remote",
                     Style::default()
                         .fg(if remote_active {
-                            theme::PURPLE
+                            theme::TEAL
                         } else {
                             theme::MUTED
                         })
@@ -873,15 +881,15 @@ impl App {
             .block(
                 Block::default()
                     .title("gitrex")
-                    .title_style(theme::panel_title_style(true, theme::ACCENT))
+                    .title_style(theme::panel_title_style(true, theme::ACTIONS))
                     .borders(Borders::ALL)
-                    .border_style(theme::panel_border_style(true, theme::ACCENT)),
+                    .border_style(theme::panel_border_style(true, theme::ACTIONS)),
             )
     }
 
     fn render_status(&self) -> Paragraph<'_> {
         let active = matches!(self.view, View::Status);
-        let accent = theme::WARNING;
+        let accent = theme::STATUS;
         let text = self
             .status
             .as_ref()
@@ -928,9 +936,9 @@ impl App {
     }
 
     fn render_remote_branches(&self) -> List<'_> {
-        let active = matches!(self.branch_panel, BranchPanel::Remote);
-        let title_color = theme::PURPLE;
-        let border_color = theme::PURPLE;
+        let active = self.remote_branch_panel_is_active();
+        let title_color = theme::TEAL;
+        let border_color = theme::TEAL;
         let item_style = theme::panel_item_style(active);
         let branches = self.remote_branches();
         let total = branches.len();
@@ -972,7 +980,7 @@ impl App {
         };
 
         List::new(items)
-            .highlight_style(theme::panel_highlight_style(active, theme::PURPLE))
+            .highlight_style(theme::panel_highlight_style(active, theme::TEAL))
             .highlight_symbol("▶ ")
             .block(
                 Block::default()
@@ -988,9 +996,9 @@ impl App {
     }
 
     fn render_local_branches(&self) -> List<'_> {
-        let active = matches!(self.branch_panel, BranchPanel::Local);
-        let title_color = theme::ACCENT;
-        let border_color = theme::ACCENT;
+        let active = self.local_branch_panel_is_active();
+        let title_color = theme::SUCCESS;
+        let border_color = theme::SUCCESS;
         let item_style = theme::panel_item_style(active);
         let local_branches = self.local_branches();
         let catalog = build_branch_catalog(&self.branches);
@@ -1038,7 +1046,7 @@ impl App {
         };
 
         List::new(items)
-            .highlight_style(theme::panel_highlight_style(active, theme::ACCENT))
+            .highlight_style(theme::panel_highlight_style(active, theme::SUCCESS))
             .highlight_symbol("▶ ")
             .block(
                 Block::default()
@@ -1104,9 +1112,9 @@ impl App {
     }
 
     fn render_actions(&self) -> Paragraph<'_> {
-        let active = matches!(self.view, View::Log);
-        let title_color = theme::SUCCESS;
-        let border_color = theme::SUCCESS;
+        let active = true;
+        let title_color = theme::ACTIONS;
+        let border_color = theme::ACTIONS;
         let copy = if matches!(self.view, View::Log) {
             let commit = self.selected_commit().map(|commit| {
                 let short_hash = commit.hash.chars().take(8).collect::<String>();
@@ -1155,21 +1163,18 @@ impl App {
 
     fn render_footer(&self) -> Paragraph<'_> {
         Paragraph::new(self.footer_text())
-            .style(
-                Style::default()
-                    .fg(match self.message_kind {
-                        MessageKind::Info => theme::TEXT,
-                        MessageKind::Success => theme::SUCCESS,
-                        MessageKind::Warning => theme::WARNING,
-                        MessageKind::Error => theme::ERROR,
-                    }),
-            )
+            .style(Style::default().fg(match self.message_kind {
+                MessageKind::Info => theme::TEXT,
+                MessageKind::Success => theme::SUCCESS,
+                MessageKind::Warning => theme::WARNING,
+                MessageKind::Error => theme::ERROR,
+            }))
             .block(
                 Block::default()
                     .title("Message")
-                    .title_style(Style::default().fg(theme::MUTED))
+                    .title_style(theme::panel_title_style(true, theme::ACTIONS))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::SURFACE_ALT)),
+                    .border_style(theme::panel_border_style(true, theme::ACTIONS)),
             )
     }
 
@@ -1213,7 +1218,7 @@ impl App {
 
     fn render_remote_picker(&self) -> Paragraph<'_> {
         let active = matches!(self.branch_panel, BranchPanel::Remote);
-        let border_color = theme::PURPLE;
+        let border_color = theme::PINK;
         let branch = self
             .selected_remote_branch()
             .map(|branch| branch.display_name())
@@ -1236,7 +1241,7 @@ impl App {
         Paragraph::new(format!(
             "Remote branch: {branch}\n\n{options}\n\nEnter = confirm • Esc = close"
         ))
-            .style(theme::panel_surface_style(active))
+        .style(theme::panel_surface_style(active))
         .block(
             Block::default()
                 .title("Remote Branch Actions")
@@ -1293,7 +1298,7 @@ impl App {
         Paragraph::new(format!(
             "Commit: {commit}\n\n{options}\n\nEnter = confirm • Esc = close"
         ))
-            .style(theme::panel_surface_style(true))
+        .style(theme::panel_surface_style(true))
         .block(
             Block::default()
                 .title("Commit Actions")
@@ -1433,6 +1438,24 @@ mod tests {
     }
 
     #[test]
+    fn branch_panels_only_show_active_colors_in_branches_view() {
+        let mut app = App::new();
+
+        app.select_view(View::Log);
+        app.set_branch_panel(BranchPanel::Local);
+        assert!(!app.local_branch_panel_is_active());
+        assert!(!app.remote_branch_panel_is_active());
+
+        app.select_view(View::Branches);
+        assert!(app.local_branch_panel_is_active());
+        assert!(!app.remote_branch_panel_is_active());
+
+        app.set_branch_panel(BranchPanel::Remote);
+        assert!(!app.local_branch_panel_is_active());
+        assert!(app.remote_branch_panel_is_active());
+    }
+
+    #[test]
     fn switching_branch_panels_materializes_visible_selection() {
         let mut app = App::new();
         app.branches = vec![
@@ -1562,6 +1585,11 @@ mod tests {
         app.message = "Pull complete.".to_string();
 
         assert_eq!(app.footer_text(), "Pulling changes...");
+    }
+
+    #[test]
+    fn actions_accent_is_shared_with_gitrex_and_message() {
+        assert_eq!(theme::ACTIONS, theme::WARNING);
     }
 
     #[test]

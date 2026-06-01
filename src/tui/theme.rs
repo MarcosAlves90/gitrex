@@ -4,11 +4,15 @@ pub const BG: Color = Color::Rgb(13, 17, 23);
 pub const SURFACE_ALT: Color = Color::Rgb(33, 38, 45);
 pub const TEXT: Color = Color::Rgb(230, 237, 243);
 pub const MUTED: Color = Color::Rgb(139, 148, 158);
-pub const ACCENT: Color = Color::Rgb(88, 166, 255);
-pub const SUCCESS: Color = Color::Rgb(63, 185, 80);
-pub const WARNING: Color = Color::Rgb(210, 153, 34);
-pub const ERROR: Color = Color::Rgb(248, 81, 73);
-pub const PURPLE: Color = Color::Rgb(168, 85, 247);
+pub const ACCENT: Color = Color::Rgb(0, 200, 255);
+pub const SUCCESS: Color = Color::Rgb(0, 220, 120);
+pub const STATUS: Color = Color::Rgb(255, 225, 120);
+pub const WARNING: Color = Color::Rgb(255, 165, 0);
+pub const ACTIONS: Color = WARNING;
+pub const ERROR: Color = Color::Rgb(255, 64, 64);
+pub const PURPLE: Color = Color::Rgb(186, 85, 255);
+pub const TEAL: Color = Color::Rgb(0, 220, 200);
+pub const PINK: Color = Color::Rgb(255, 90, 180);
 
 pub fn panel_title_style(active: bool, accent: Color) -> Style {
     let mut style = Style::default().fg(if active { accent } else { MUTED });
