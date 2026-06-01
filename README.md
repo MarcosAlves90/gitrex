@@ -44,7 +44,8 @@
 - Falls back to CLI output for scripts, pipes, and automation
 - Uses an embedded libgit2 backend, so it does not depend on the `git` binary
 - Covers status, branch inspection, recent commit review, checkout, switch, branch creation, clone, pull, and push
-- Includes a branch-focused TUI with local/remote panels, branch-specific graph navigation, branch actions, and commit actions
+- Includes a branch-focused TUI with local/remote panels, branch search, branch deletion confirmation, branch-specific graph navigation, and commit actions
+- Shows a loading splash while the repository snapshot is being synchronized
 
 ## Architecture
 
@@ -114,7 +115,8 @@ flowchart LR
 - `/` opens branch search and filters both local and remote refs
 - `Enter` opens the branch action picker for the active panel
 - In the local branch panel, branch actions include checkout, switch, pull, push, and creating a branch from the selected source
-- In the remote branch panel, branch actions include creating a local branch or checking out detached HEAD
+- In the local branch panel, branch actions also include deleting the selected local branch after confirmation
+- In the remote branch panel, branch actions include creating a local branch, checking out detached HEAD, or deleting the selected remote branch after confirmation
 ### Graph view
 
 - `j/k` or arrow keys move between commits
@@ -228,3 +230,4 @@ cargo test
 
 - The CLI path prints a help hint when no subcommand is provided outside an interactive terminal.
 - The TUI is the primary interactive experience.
+- The TUI refreshes remote refs before reading status, branches, and history so the snapshot stays consistent.
