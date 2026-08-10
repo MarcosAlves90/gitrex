@@ -178,11 +178,12 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
 
 #[cfg(test)]
 mod tests {
-    use super::OperationRequest;
+    use super::{execute_operation, GitOperationRunner, OperationOutcome, OperationRequest};
     use crate::git::GitClient;
     use crate::test_support::{
-        checkout_branch, commit_all, configure_user, create_branch, current_dir_lock, init_repo,
-        write_file, CurrentDirGuard,
+        checkout_branch, clone_bare_repo, clone_repo, commit_all, configure_user, create_branch,
+        current_dir_lock, init_repo, push_branch, set_remote_head, set_upstream, write_file,
+        CurrentDirGuard,
     };
 
     #[test]
@@ -287,5 +288,209 @@ mod tests {
             .commits
             .iter()
             .any(|entry| entry.subject == "feature work"));
+    }
+
+    #[test]
+    fn request_labels_cover_every_operation_variant() {
+        let requests = [
+            OperationRequest::Checkout {
+                branch: "main".into(),
+            },
+            OperationRequest::CheckoutDetached {
+                target: "abc123".into(),
+            },
+            OperationRequest::Switch {
+                branch: "main".into(),
+            },
+            OperationRequest::CreateBranch {
+                branch: "feature".into(),
+                start_point: "main".into(),
+            },
+            OperationRequest::DeleteLocalBranch {
+                branch: "feature".into(),
+            },
+            OperationRequest::DeleteRemoteBranch {
+                remote: "origin".into(),
+                branch: "feature".into(),
+            },
+            OperationRequest::Pull {
+                remote: None,
+                branch: None,
+            },
+            OperationRequest::Push {
+                remote: None,
+                branch: None,
+            },
+        ];
+
+        for request in requests {
+            assert!(!request.loading_label().is_empty());
+            assert!(!request.success_label().is_empty());
+        }
+
+        assert_eq!(
+            OperationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("main".into()),
+            }
+            .loading_label(),
+            "origin/main"
+        );
+        assert_eq!(
+            OperationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("main".into()),
+            }
+            .success_label(),
+            "Pushed origin/main"
+        );
+    }
+
+    #[test]
+    fn execute_operation_covers_local_mutations_and_failures() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        commit_all(&repo, "base");
+        create_branch(&repo, "feature/login", "HEAD");
+
+        let client = GitClient::from_path(temp.path());
+
+        assert!(matches!(
+            execute_operation(
+                <GitClient as Clone>::clone(&client),
+                OperationRequest::Checkout {
+                    branch: "feature/login".to_string(),
+                },
+            ),
+            OperationOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            execute_operation(
+                <GitClient as Clone>::clone(&client),
+                OperationRequest::Switch {
+                    branch: "main".to_string(),
+                },
+            ),
+            OperationOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            execute_operation(
+                <GitClient as Clone>::clone(&client),
+                OperationRequest::CreateBranch {
+                    branch: "topic".to_string(),
+                    start_point: "main".to_string(),
+                },
+            ),
+            OperationOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            execute_operation(
+                <GitClient as Clone>::clone(&client),
+                OperationRequest::DeleteLocalBranch {
+                    branch: "feature/login".to_string(),
+                },
+            ),
+            OperationOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            execute_operation(
+                <GitClient as Clone>::clone(&client),
+                OperationRequest::CheckoutDetached {
+                    target: "HEAD".to_string(),
+                },
+            ),
+            OperationOutcome::Success { .. }
+        ));
+        assert!(matches!(
+            execute_operation(
+                <GitClient as Clone>::clone(&client),
+                OperationRequest::Checkout {
+                    branch: "definitely-missing".to_string(),
+                },
+            ),
+            OperationOutcome::Error(_)
+        ));
+
+        let runner = GitOperationRunner::new(client);
+        let outcome = runner
+            .spawn(OperationRequest::Switch {
+                branch: "definitely-missing".to_string(),
+            })
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(matches!(outcome, OperationOutcome::Error(_)));
+    }
+
+    #[test]
+    fn execute_operation_covers_pull_push_and_remote_delete() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let seed = temp.path().join("seed");
+        let origin = temp.path().join("origin.git");
+        let worktree = temp.path().join("worktree");
+        let collaborator = temp.path().join("collaborator");
+
+        let seed_repo = init_repo(&seed, "main");
+        configure_user(&seed_repo);
+        write_file(&seed, "README.md", "base\n");
+        commit_all(&seed_repo, "base");
+
+        let origin_repo = clone_bare_repo(&seed, &origin);
+        set_remote_head(&origin_repo, "refs/heads/main");
+        let worktree_repo = clone_repo(&origin, &worktree);
+        configure_user(&worktree_repo);
+        set_upstream(&worktree_repo, "main", "origin/main");
+        let collaborator_repo = clone_repo(&origin, &collaborator);
+        configure_user(&collaborator_repo);
+
+        write_file(&collaborator, "README.md", "remote update\n");
+        commit_all(&collaborator_repo, "remote update");
+        push_branch(&collaborator_repo, "origin", "main");
+
+        let client = GitClient::from_path(&worktree);
+        assert!(matches!(
+            execute_operation(
+                <GitClient as Clone>::clone(&client),
+                OperationRequest::Pull {
+                    remote: Some("origin".to_string()),
+                    branch: Some("main".to_string()),
+                },
+            ),
+            OperationOutcome::Success { .. }
+        ));
+
+        write_file(&worktree, "feature.txt", "feature\n");
+        commit_all(&worktree_repo, "feature work");
+        create_branch(&worktree_repo, "feature/login", "HEAD");
+        checkout_branch(&worktree_repo, "feature/login");
+
+        assert!(matches!(
+            execute_operation(
+                <GitClient as Clone>::clone(&client),
+                OperationRequest::Push {
+                    remote: Some("origin".to_string()),
+                    branch: Some("feature/login".to_string()),
+                },
+            ),
+            OperationOutcome::Success { .. }
+        ));
+        assert!(origin_repo
+            .find_reference("refs/heads/feature/login")
+            .is_ok());
+
+        assert!(matches!(
+            execute_operation(
+                client,
+                OperationRequest::DeleteRemoteBranch {
+                    remote: "origin".to_string(),
+                    branch: "feature/login".to_string(),
+                },
+            ),
+            OperationOutcome::Success { .. }
+        ));
+        assert!(origin_repo
+            .find_reference("refs/heads/feature/login")
+            .is_err());
     }
 }

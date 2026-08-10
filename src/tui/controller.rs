@@ -1032,4 +1032,347 @@ mod tests {
             .iter()
             .any(|entry| entry.subject == "main work"));
     }
+
+    fn controller_with_state() -> TuiController {
+        let mut controller = TuiController::new(GitClient::new());
+        controller.app_mut().branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: Some("origin/main".to_string()),
+                commit: "1111111111111111111111111111111111111111".to_string(),
+                subject: "main".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "1111111111111111111111111111111111111111".to_string(),
+                subject: "main".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+        controller.app_mut().selected_branch = Some("main".to_string());
+        controller.app_mut().selected_remote_branch = Some("refs/remotes/origin/main".to_string());
+        controller.app_mut().status = Some(RepoStatus {
+            branch_name: "main".to_string(),
+            upstream: Some("origin/main".to_string()),
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+        });
+        controller.app_mut().log = vec![CommitSummary {
+            hash: "1111111111111111111111111111111111111111".to_string(),
+            author: "Marcos".to_string(),
+            date: "2026-08-09".to_string(),
+            subject: "main".to_string(),
+        }];
+        controller
+    }
+
+    #[test]
+    fn intent_routing_covers_global_and_modal_key_paths() {
+        let mut controller = controller_with_state();
+
+        for (key, expected) in [
+            (KeyCode::Char('q'), Intent::Quit),
+            (KeyCode::Esc, Intent::Quit),
+            (KeyCode::Char('r'), Intent::Refresh),
+            (KeyCode::Char('1'), Intent::SelectView(View::Status)),
+            (KeyCode::Char('2'), Intent::SelectView(View::Branches)),
+            (KeyCode::Char('3'), Intent::SelectView(View::Log)),
+            (KeyCode::Char('h'), Intent::OpenHelp),
+        ] {
+            assert_eq!(
+                controller.intent_for_key(KeyEvent::new(key, KeyModifiers::NONE)),
+                expected
+            );
+        }
+
+        controller.app_mut().open_help();
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Intent::Quit
+        );
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Intent::None
+        );
+        controller.app_mut().close_help();
+
+        controller
+            .app_mut()
+            .open_delete_branch_confirm(DeleteBranchTarget::Local {
+                branch: "main".to_string(),
+            });
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+            Intent::None
+        );
+        controller.app_mut().close_delete_branch_confirm();
+
+        controller
+            .app_mut()
+            .open_branch_creator_from_source("main".to_string(), crate::tui::theme::SUCCESS);
+        for (key, expected) in [
+            (KeyCode::Esc, Intent::CancelBranchCreate),
+            (KeyCode::Enter, Intent::ConfirmBranchCreate),
+            (KeyCode::Backspace, Intent::DeleteBranchName),
+            (KeyCode::Char('x'), Intent::TypeBranchName('x')),
+            (KeyCode::Down, Intent::None),
+        ] {
+            assert_eq!(
+                controller.intent_for_key(KeyEvent::new(key, KeyModifiers::NONE)),
+                expected
+            );
+        }
+        controller.app_mut().close_branch_creator();
+
+        controller.app_mut().open_branch_search();
+        for (key, expected) in [
+            (KeyCode::Esc, Intent::CloseBranchSearch),
+            (KeyCode::Enter, Intent::ConfirmBranchSearch),
+            (KeyCode::Backspace, Intent::DeleteBranchSearchChar),
+            (KeyCode::Char('x'), Intent::TypeBranchSearchChar('x')),
+            (KeyCode::Down, Intent::None),
+        ] {
+            assert_eq!(
+                controller.intent_for_key(KeyEvent::new(key, KeyModifiers::NONE)),
+                expected
+            );
+        }
+        controller.app_mut().close_branch_search();
+
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Local);
+        controller.app_mut().open_picker();
+        for (key, expected) in [
+            (KeyCode::Esc, Intent::ClosePicker),
+            (KeyCode::Enter, Intent::ConfirmPicker),
+            (KeyCode::Down, Intent::MovePicker(1)),
+            (KeyCode::Up, Intent::MovePicker(-1)),
+            (KeyCode::Char('x'), Intent::None),
+        ] {
+            assert_eq!(
+                controller.intent_for_key(KeyEvent::new(key, KeyModifiers::NONE)),
+                expected
+            );
+        }
+        controller.app_mut().close_picker();
+
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Remote);
+        controller.app_mut().open_remote_picker();
+        for (key, expected) in [
+            (KeyCode::Esc, Intent::CloseRemotePicker),
+            (KeyCode::Enter, Intent::ConfirmRemotePicker),
+            (KeyCode::Down, Intent::MoveRemotePicker(1)),
+            (KeyCode::Up, Intent::MoveRemotePicker(-1)),
+            (KeyCode::Char('x'), Intent::None),
+        ] {
+            assert_eq!(
+                controller.intent_for_key(KeyEvent::new(key, KeyModifiers::NONE)),
+                expected
+            );
+        }
+        controller.app_mut().close_remote_picker();
+
+        controller.app_mut().open_commit_actions();
+        for (key, expected) in [
+            (KeyCode::Esc, Intent::CloseCommitActions),
+            (KeyCode::Enter, Intent::ConfirmCommitAction),
+            (KeyCode::Down, Intent::MoveCommitAction(1)),
+            (KeyCode::Up, Intent::MoveCommitAction(-1)),
+            (KeyCode::Char('x'), Intent::None),
+        ] {
+            assert_eq!(
+                controller.intent_for_key(KeyEvent::new(key, KeyModifiers::NONE)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn apply_intent_covers_state_only_transitions() {
+        let mut controller = controller_with_state();
+
+        assert!(!controller.apply_intent(Intent::None).unwrap());
+        assert!(controller.apply_intent(Intent::Quit).unwrap());
+        assert!(!controller
+            .apply_intent(Intent::SelectView(View::Log))
+            .unwrap());
+        assert!(!controller
+            .apply_intent(Intent::MoveCommitSelection(1))
+            .unwrap());
+        assert!(!controller
+            .apply_intent(Intent::MoveCommitSelection(-1))
+            .unwrap());
+        assert!(!controller.apply_intent(Intent::OpenHelp).unwrap());
+        assert!(!controller.apply_intent(Intent::MoveHelpScroll(1)).unwrap());
+        assert!(!controller.apply_intent(Intent::CloseHelp).unwrap());
+
+        assert!(!controller
+            .apply_intent(Intent::SelectView(View::Branches))
+            .unwrap());
+        assert!(!controller.apply_intent(Intent::OpenBranchSearch).unwrap());
+        assert!(!controller
+            .apply_intent(Intent::TypeBranchSearchChar('m'))
+            .unwrap());
+        assert!(!controller
+            .apply_intent(Intent::DeleteBranchSearchChar)
+            .unwrap());
+        controller.app_mut().branch_search_input.clear();
+        assert!(!controller
+            .apply_intent(Intent::ConfirmBranchSearch)
+            .unwrap());
+        assert!(!controller.apply_intent(Intent::CloseBranchSearch).unwrap());
+
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Local);
+        assert!(!controller.apply_intent(Intent::OpenPicker).unwrap());
+        assert!(!controller.apply_intent(Intent::MovePicker(1)).unwrap());
+        assert!(!controller.apply_intent(Intent::MovePicker(-1)).unwrap());
+        assert!(!controller.apply_intent(Intent::ClosePicker).unwrap());
+
+        controller
+            .app_mut()
+            .set_branch_panel(super::BranchPanel::Remote);
+        assert!(!controller.apply_intent(Intent::OpenRemotePicker).unwrap());
+        assert!(!controller
+            .apply_intent(Intent::MoveRemotePicker(1))
+            .unwrap());
+        assert!(!controller
+            .apply_intent(Intent::MoveRemotePicker(-1))
+            .unwrap());
+        assert!(!controller.apply_intent(Intent::CloseRemotePicker).unwrap());
+
+        assert!(!controller.apply_intent(Intent::OpenCommitActions).unwrap());
+        assert!(!controller
+            .apply_intent(Intent::MoveCommitAction(1))
+            .unwrap());
+        assert!(!controller
+            .apply_intent(Intent::MoveCommitAction(-1))
+            .unwrap());
+        assert!(!controller.apply_intent(Intent::CloseCommitActions).unwrap());
+
+        controller
+            .app_mut()
+            .open_delete_branch_confirm(DeleteBranchTarget::Local {
+                branch: "main".to_string(),
+            });
+        assert!(!controller.apply_intent(Intent::CancelDeleteBranch).unwrap());
+
+        controller
+            .app_mut()
+            .open_branch_creator_from_source("main".to_string(), crate::tui::theme::SUCCESS);
+        assert!(!controller
+            .apply_intent(Intent::TypeBranchName('x'))
+            .unwrap());
+        assert!(!controller.apply_intent(Intent::DeleteBranchName).unwrap());
+        assert!(!controller.apply_intent(Intent::CancelBranchCreate).unwrap());
+        controller
+            .app_mut()
+            .open_branch_creator_from_source("main".to_string(), crate::tui::theme::SUCCESS);
+        assert!(!controller
+            .apply_intent(Intent::ConfirmBranchCreate)
+            .unwrap());
+
+        controller.app_mut().start_loading("loading");
+        controller.tick();
+        controller.app_mut().select_view(View::Log);
+        controller.tick();
+    }
+
+    #[test]
+    fn build_operation_covers_picker_variants_and_invalid_direct_actions() {
+        let controller = controller_with_state();
+
+        assert!(matches!(
+            controller.build_operation(crate::tui::app::PickerAction::Checkout),
+            Ok(crate::tui::operations::OperationRequest::Checkout { .. })
+        ));
+        assert!(matches!(
+            controller.build_operation(crate::tui::app::PickerAction::Switch),
+            Ok(crate::tui::operations::OperationRequest::Switch { .. })
+        ));
+        assert!(matches!(
+            controller.build_operation(crate::tui::app::PickerAction::Pull),
+            Ok(crate::tui::operations::OperationRequest::Pull {
+                remote: Some(_),
+                branch: Some(_)
+            })
+        ));
+        assert!(matches!(
+            controller.build_operation(crate::tui::app::PickerAction::Push),
+            Ok(crate::tui::operations::OperationRequest::Push {
+                remote: Some(_),
+                branch: Some(_)
+            })
+        ));
+        assert!(controller
+            .build_operation(crate::tui::app::PickerAction::CreateBranch)
+            .is_err());
+        assert!(controller
+            .build_operation(crate::tui::app::PickerAction::DeleteBranch)
+            .is_err());
+    }
+
+    #[test]
+    fn poll_operation_covers_empty_success_error_and_disconnect() {
+        let mut controller = controller_with_state();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        controller.operation_rx = Some(rx);
+        controller.poll_operation().unwrap();
+        assert!(controller.operation_rx.is_some());
+
+        tx.send(crate::tui::operations::OperationOutcome::Error(
+            "operation failed".to_string(),
+        ))
+        .unwrap();
+        controller.poll_operation().unwrap();
+        assert!(controller.operation_rx.is_none());
+        assert_eq!(
+            controller.app().message_kind,
+            crate::tui::app::MessageKind::Error
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        controller.operation_rx = Some(rx);
+        tx.send(crate::tui::operations::OperationOutcome::Success {
+            snapshot: crate::domain::RepoSnapshot {
+                status: RepoStatus {
+                    branch_name: "success".to_string(),
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    files: Vec::new(),
+                },
+                branches: Vec::new(),
+                history: crate::domain::BranchHistory::from_graph(Vec::new()),
+                selected_branch: None,
+            },
+            message: "success".to_string(),
+        })
+        .unwrap();
+        controller.poll_operation().unwrap();
+        assert_eq!(
+            controller.app().status.as_ref().unwrap().branch_name,
+            "success"
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel::<crate::tui::operations::OperationOutcome>();
+        controller.operation_rx = Some(rx);
+        drop(tx);
+        controller.poll_operation().unwrap();
+        assert!(controller.operation_rx.is_none());
+        assert_eq!(
+            controller.app().message_kind,
+            crate::tui::app::MessageKind::Error
+        );
+    }
 }
