@@ -2,7 +2,9 @@ use assert_cmd::Command as AssertCommand;
 use predicates::prelude::PredicateBooleanExt;
 use tempfile::TempDir;
 
-use gitrex::test_support::{
+mod support;
+
+use support::{
     checkout_branch, clone_bare_repo, clone_repo, commit_all, configure_user, create_branch,
     current_dir_lock, init_repo, push_branch, set_remote_head, set_upstream, write_file,
     CurrentDirGuard,
@@ -180,6 +182,63 @@ fn cli_can_push_and_pull_with_a_real_remote() {
     assert!(origin_repo
         .find_reference("refs/heads/feature/login")
         .is_ok());
+}
+
+#[test]
+fn cli_push_and_pull_preserve_different_local_and_remote_branch_names() {
+    let _guard = current_dir_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+
+    let temp = TempDir::new().unwrap();
+    let seed = temp.path().join("seed");
+    let origin = temp.path().join("origin.git");
+    let worktree = temp.path().join("worktree");
+    let collaborator = temp.path().join("collaborator");
+
+    let seed_repo = init_repo(&seed, "main");
+    configure_user(&seed_repo);
+    write_file(&seed, "README.md", "base\n");
+    commit_all(&seed_repo, "base");
+
+    let origin_repo = clone_bare_repo(&seed, &origin);
+    set_remote_head(&origin_repo, "refs/heads/main");
+    let worktree_repo = clone_repo(&origin, &worktree);
+    configure_user(&worktree_repo);
+    create_branch(&worktree_repo, "release-candidate", "HEAD");
+    checkout_branch(&worktree_repo, "release-candidate");
+    write_file(&worktree, "release.txt", "local\n");
+    commit_all(&worktree_repo, "local release work");
+
+    assert_gitrex(&worktree, &["push", "origin", "release"])
+        .success()
+        .stdout(predicates::str::contains("push complete"));
+    assert_gitrex(&worktree, &["fetch", "origin"])
+        .success()
+        .stdout(predicates::str::contains("fetch complete"));
+    set_upstream(&worktree_repo, "release-candidate", "origin/release");
+
+    let collaborator_repo = clone_repo(&origin, &collaborator);
+    configure_user(&collaborator_repo);
+    create_branch(&collaborator_repo, "release", "origin/release");
+    checkout_branch(&collaborator_repo, "release");
+    set_upstream(&collaborator_repo, "release", "origin/release");
+    write_file(&collaborator, "release.txt", "local\nremote\n");
+    commit_all(&collaborator_repo, "remote release work");
+    push_branch(&collaborator_repo, "origin", "release");
+
+    assert_gitrex(&worktree, &["pull", "origin", "release"])
+        .success()
+        .stdout(predicates::str::contains("pull complete"));
+
+    assert_eq!(
+        worktree_repo.head().unwrap().shorthand(),
+        Some("release-candidate")
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("release.txt")).unwrap(),
+        "local\nremote\n"
+    );
 }
 
 #[test]

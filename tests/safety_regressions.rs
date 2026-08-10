@@ -2,13 +2,14 @@ use std::fs;
 
 use tempfile::TempDir;
 
-use gitrex::{
-    git::GitClient,
-    test_support::{
-        checkout_branch, clone_bare_repo, clone_repo, commit_all, configure_user, create_branch,
-        current_dir_lock, init_repo, push_branch, set_remote_head, set_upstream, write_file,
-        CurrentDirGuard,
-    },
+use gitrex::git::GitClient;
+
+mod support;
+
+use support::{
+    checkout_branch, clone_bare_repo, clone_repo, commit_all, configure_user, create_branch,
+    current_dir_lock, init_repo, push_branch, set_remote_head, set_upstream, write_file,
+    CurrentDirGuard,
 };
 
 #[test]

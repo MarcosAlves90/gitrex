@@ -1,4 +1,5 @@
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
+#[path = "../tests/support/mod.rs"]
 pub mod test_support;
 
 pub mod app;
