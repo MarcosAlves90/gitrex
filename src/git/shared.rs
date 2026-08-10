@@ -11,10 +11,6 @@ pub fn map_error(error: git2::Error) -> GitError {
     }
 }
 
-pub fn short_oid(oid: Oid) -> String {
-    oid.to_string().chars().take(8).collect()
-}
-
 pub fn short_date(seconds: i64) -> String {
     Utc.timestamp_opt(seconds, 0)
         .single()
@@ -46,7 +42,7 @@ pub fn collect_history_commits(
         commits.push(HistoryCommit {
             id: commit.id(),
             summary: CommitSummary {
-                hash: short_oid(commit.id()),
+                hash: commit.id().to_string(),
                 author: commit.author().name().unwrap_or("unknown").to_string(),
                 date: short_date(commit.time().seconds()),
                 subject: commit.summary().unwrap_or_default().to_string(),

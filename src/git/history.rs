@@ -5,13 +5,23 @@ use crate::domain::BranchHistory;
 use super::shared::{collect_history_commits, render_graph};
 use super::GitClient;
 
+pub const DEFAULT_HISTORY_LIMIT: usize = 200;
+
 pub fn read_branch_history(
     client: &GitClient,
     reference: &str,
 ) -> crate::domain::Result<BranchHistory> {
+    read_branch_history_with_limit(client, reference, DEFAULT_HISTORY_LIMIT)
+}
+
+pub fn read_branch_history_with_limit(
+    client: &GitClient,
+    reference: &str,
+    limit: usize,
+) -> crate::domain::Result<BranchHistory> {
     let repo = client.repo()?;
     let start = resolve_reference(&repo, reference)?;
-    let commits = collect_history_commits(&repo, start, None)?;
+    let commits = collect_history_commits(&repo, start, Some(limit))?;
     let graph = render_graph(&commits);
     Ok(BranchHistory {
         commits: commits.into_iter().map(|commit| commit.summary).collect(),
