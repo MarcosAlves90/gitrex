@@ -45,6 +45,10 @@ impl GitClient {
         Repository::discover(&self.discovery_path).map_err(map_repo_error)
     }
 
+    pub(crate) fn git(&self) -> super::GitProcess {
+        super::GitProcess::new(&self.discovery_path)
+    }
+
     pub fn status(&self) -> Result<crate::domain::RepoStatus> {
         crate::git::status::read_status(self)
     }
@@ -131,11 +135,8 @@ impl GitClient {
     }
 
     pub fn delete_local_branch(&self, branch: &str) -> Result<()> {
-        let repo = self.repo()?;
-        let mut branch = repo
-            .find_branch(branch, BranchType::Local)
-            .map_err(map_git_error)?;
-        branch.delete().map_err(map_git_error)?;
+        self.git().ensure_repository()?;
+        self.git().run(["branch", "-d", "--", branch])?;
         Ok(())
     }
 
@@ -152,7 +153,7 @@ impl GitClient {
         Ok(())
     }
 
-    pub fn clone(&self, repository: &str, directory: Option<&Path>) -> Result<()> {
+    pub fn clone_repository(&self, repository: &str, directory: Option<&Path>) -> Result<()> {
         let path = match directory {
             Some(path) => path.to_path_buf(),
             None => default_clone_path(repository),
@@ -365,6 +366,31 @@ mod tests {
         assert!(repo
             .find_branch("feature/login", git2::BranchType::Local)
             .is_err());
+    }
+
+    #[test]
+    fn delete_local_branch_refuses_unmerged_commits() {
+        let _guard = current_dir_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        commit_all(&repo, "initial commit");
+        create_branch(&repo, "feature/unique", "HEAD");
+        checkout_branch(&repo, "feature/unique");
+        write_file(temp.path(), "feature.txt", "unique\n");
+        commit_all(&repo, "unique feature commit");
+        checkout_branch(&repo, "main");
+        let _restore = CurrentDirGuard::push(temp.path());
+
+        let client = GitClient::new();
+        assert!(client.delete_local_branch("feature/unique").is_err());
+
+        assert!(repo
+            .find_branch("feature/unique", git2::BranchType::Local)
+            .is_ok());
     }
 
     #[test]

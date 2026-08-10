@@ -1,29 +1,12 @@
-use git2::{Repository, Status, StatusOptions};
-
 use crate::domain::{RepoStatus, StatusEntry};
 
-use super::shared::map_error;
 use super::GitClient;
 
 pub fn read_status(client: &GitClient) -> crate::domain::Result<RepoStatus> {
-    let repo = client.repo()?;
-    let head = repo.head().ok();
-    let branch_name = head
-        .as_ref()
-        .and_then(|reference| reference.shorthand())
-        .unwrap_or("HEAD")
-        .to_string();
-    let upstream = upstream_name(&repo, branch_name.as_str());
-    let (ahead, behind) = ahead_behind(&repo, branch_name.as_str(), upstream.as_deref());
-    let files = repo_status_entries(&repo)?;
-
-    Ok(RepoStatus {
-        branch_name,
-        upstream,
-        ahead,
-        behind,
-        files,
-    })
+    let git = client.git();
+    git.ensure_repository()?;
+    let output = git.run_text(["status", "--porcelain=v1", "--branch"])?;
+    Ok(parse_status_output(&output))
 }
 
 pub fn parse_status_output(output: &str) -> RepoStatus {
@@ -48,99 +31,14 @@ pub fn parse_status_output(output: &str) -> RepoStatus {
     }
 }
 
-fn upstream_name(repo: &Repository, branch_name: &str) -> Option<String> {
-    let branch = repo
-        .find_branch(branch_name, git2::BranchType::Local)
-        .ok()?;
-    branch
-        .upstream()
-        .ok()?
-        .name()
-        .ok()
-        .flatten()
-        .map(|name| name.to_string())
-}
-
-fn ahead_behind(repo: &Repository, branch_name: &str, upstream: Option<&str>) -> (u32, u32) {
-    let Some(upstream) = upstream else {
-        return (0, 0);
-    };
-    let Some(local_commit) = repo
-        .find_branch(branch_name, git2::BranchType::Local)
-        .ok()
-        .and_then(|branch| branch.get().target())
-    else {
-        return (0, 0);
-    };
-    let Some(upstream_commit) = repo
-        .revparse_single(upstream)
-        .ok()
-        .and_then(|object| object.peel_to_commit().ok())
-        .map(|commit| commit.id())
-    else {
-        return (0, 0);
-    };
-
-    repo.graph_ahead_behind(local_commit, upstream_commit)
-        .map(|(ahead, behind)| (ahead as u32, behind as u32))
-        .unwrap_or((0, 0))
-}
-
-fn repo_status_entries(repo: &Repository) -> crate::domain::Result<Vec<StatusEntry>> {
-    let mut options = StatusOptions::new();
-    options
-        .include_untracked(true)
-        .include_ignored(false)
-        .recurse_untracked_dirs(true)
-        .renames_head_to_index(true)
-        .renames_index_to_workdir(true);
-
-    let statuses = repo.statuses(Some(&mut options)).map_err(map_error)?;
-    Ok(statuses
-        .iter()
-        .filter_map(|entry| {
-            let path = entry.path()?.to_string();
-            let code = status_code(entry.status());
-            Some(StatusEntry { code, path })
-        })
-        .collect())
-}
-
-fn status_code(status: Status) -> String {
-    if status.contains(Status::WT_NEW) {
-        return String::from("??");
+fn parse_branch_header(header: &str) -> (String, Option<String>, u32, u32) {
+    if let Some(branch) = header.strip_prefix("No commits yet on ") {
+        return (branch.to_string(), None, 0, 0);
+    }
+    if header.starts_with("HEAD (") {
+        return (String::from("HEAD"), None, 0, 0);
     }
 
-    let index = if status.contains(Status::INDEX_NEW) {
-        'A'
-    } else if status.contains(Status::INDEX_MODIFIED) {
-        'M'
-    } else if status.contains(Status::INDEX_DELETED) {
-        'D'
-    } else if status.contains(Status::INDEX_RENAMED) {
-        'R'
-    } else if status.contains(Status::INDEX_TYPECHANGE) {
-        'T'
-    } else {
-        ' '
-    };
-
-    let worktree = if status.contains(Status::WT_MODIFIED) {
-        'M'
-    } else if status.contains(Status::WT_DELETED) {
-        'D'
-    } else if status.contains(Status::WT_RENAMED) {
-        'R'
-    } else if status.contains(Status::WT_TYPECHANGE) {
-        'T'
-    } else {
-        ' '
-    };
-
-    format!("{index}{worktree}")
-}
-
-fn parse_branch_header(header: &str) -> (String, Option<String>, u32, u32) {
     let mut branch_name = header.to_string();
     let mut upstream = None;
     let mut ahead = 0;
@@ -169,12 +67,11 @@ fn parse_branch_header(header: &str) -> (String, Option<String>, u32, u32) {
 }
 
 fn parse_status_entry(line: &str) -> Option<StatusEntry> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if line.is_empty() {
         return None;
     }
-    let code = trimmed.get(0..2)?.to_string();
-    let path = trimmed.get(3..)?.to_string();
+    let code = line.get(0..2)?.to_string();
+    let path = line.get(3..)?.to_string();
     Some(StatusEntry { code, path })
 }
 
@@ -194,6 +91,19 @@ mod tests {
         assert_eq!(status.upstream.as_deref(), Some("origin/main"));
         assert_eq!(status.ahead, 1);
         assert_eq!(status.files.len(), 2);
+        assert_eq!(status.files[0].code, " M");
+        assert_eq!(status.files[0].path, "src/lib.rs");
+    }
+
+    #[test]
+    fn parses_unborn_and_detached_branch_headers() {
+        let unborn = super::parse_status_output("## No commits yet on main\n");
+        assert_eq!(unborn.branch_name, "main");
+        assert!(unborn.upstream.is_none());
+
+        let detached = super::parse_status_output("## HEAD (no branch)\n");
+        assert_eq!(detached.branch_name, "HEAD");
+        assert!(detached.upstream.is_none());
     }
 
     #[test]

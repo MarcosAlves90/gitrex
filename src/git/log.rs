@@ -1,23 +1,18 @@
-use git2::{Oid, Repository};
-
 use crate::domain::{CommitSummary, GraphLine};
 
-use super::shared::{collect_history_commits, map_error};
 use super::GitClient;
 
 pub fn read_log(client: &GitClient, limit: usize) -> crate::domain::Result<Vec<CommitSummary>> {
-    let repo = client.repo()?;
-    let start = head_oid(&repo)?;
-    let commits = collect_history_commits(&repo, start, Some(limit))?;
-    Ok(commits.into_iter().map(|commit| commit.summary).collect())
-}
-
-fn head_oid(repo: &Repository) -> crate::domain::Result<Oid> {
-    repo.head()
-        .map_err(map_error)?
-        .peel_to_commit()
-        .map_err(map_error)
-        .map(|commit| commit.id())
+    let git = client.git();
+    git.ensure_repository()?;
+    let max_count = format!("--max-count={limit}");
+    let output = git.run_text([
+        "log",
+        max_count.as_str(),
+        "--date=format:%Y-%m-%d",
+        "--format=%H%x09%an%x09%ad%x09%s",
+    ])?;
+    Ok(parse_log_lines(&output))
 }
 
 pub fn parse_log_lines(output: &str) -> Vec<CommitSummary> {

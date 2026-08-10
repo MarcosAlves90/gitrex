@@ -29,7 +29,7 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
             repository,
             directory,
         }) => {
-            client.clone(&repository, directory.as_deref())?;
+            client.clone_repository(&repository, directory.as_deref())?;
             output::print_message("clone complete");
         }
         Some(Commands::Fetch { remote }) => {

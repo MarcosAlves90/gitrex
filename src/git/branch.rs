@@ -1,16 +1,18 @@
-use git2::{BranchType, Repository};
-
 use crate::domain::{BranchInfo, BranchKind};
 
-use super::shared::map_error;
 use super::GitClient;
 
 pub fn list_branches(client: &GitClient) -> crate::domain::Result<Vec<BranchInfo>> {
-    let repo = client.repo()?;
-    let mut branches = Vec::new();
-
-    collect_branches(&repo, BranchType::Local, &mut branches)?;
-    collect_branches(&repo, BranchType::Remote, &mut branches)?;
+    let git = client.git();
+    git.ensure_repository()?;
+    let output = git.run_text([
+        "for-each-ref",
+        "--format=%(HEAD)%09%(refname:short)%09%(upstream:short)%09%(objectname)%09%(subject)%09%(refname)",
+        "refs/heads/",
+        "refs/remotes/",
+    ])?;
+    let mut branches = parse_branch_lines(&output);
+    branches.retain(|branch| !(branch.is_remote() && branch.branch_short_name() == "HEAD"));
     branches.sort_by(|left, right| {
         right
             .commit
@@ -49,62 +51,6 @@ pub fn parse_branch_lines(output: &str) -> Vec<BranchInfo> {
             })
         })
         .collect()
-}
-
-fn collect_branches(
-    repo: &Repository,
-    kind: BranchType,
-    branches: &mut Vec<BranchInfo>,
-) -> crate::domain::Result<()> {
-    let head_name = repo
-        .head()
-        .ok()
-        .and_then(|reference| reference.shorthand().map(|name| name.to_string()));
-
-    let iter = repo.branches(Some(kind)).map_err(map_error)?;
-    for item in iter {
-        let (branch, branch_type) = item.map_err(map_error)?;
-        let name = branch
-            .name()
-            .map_err(map_error)?
-            .unwrap_or_default()
-            .to_string();
-        if matches!(kind, BranchType::Remote) && name == "HEAD" {
-            continue;
-        }
-        let commit = branch
-            .get()
-            .target()
-            .map(|oid| oid.to_string())
-            .unwrap_or_default();
-        let subject = branch
-            .get()
-            .peel_to_commit()
-            .ok()
-            .and_then(|commit| commit.summary().map(|summary| summary.to_string()))
-            .unwrap_or_default();
-        let upstream = branch
-            .upstream()
-            .ok()
-            .and_then(|upstream| upstream.name().ok().flatten().map(|name| name.to_string()));
-        let current =
-            head_name.as_deref() == Some(name.as_str()) && matches!(branch_type, BranchType::Local);
-
-        branches.push(BranchInfo {
-            name,
-            current,
-            upstream,
-            commit,
-            subject,
-            kind: if matches!(kind, BranchType::Remote) {
-                BranchKind::Remote
-            } else {
-                BranchKind::Local
-            },
-        });
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

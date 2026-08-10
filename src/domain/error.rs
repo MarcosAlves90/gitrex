@@ -4,6 +4,14 @@ pub type Result<T> = std::result::Result<T, GitError>;
 
 #[derive(Debug, Error)]
 pub enum GitError {
+    #[error("git executable was not found")]
+    GitNotInstalled,
+    #[error("git command `{command}` failed (exit {exit_code:?}): {stderr}")]
+    CommandFailed {
+        command: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
     #[error("failed to run git: {0}")]
     Io(#[from] std::io::Error),
     #[error("repository not found")]
