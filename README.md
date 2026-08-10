@@ -43,9 +43,9 @@
 - Defaults to the TUI when both `stdin` and `stdout` are terminals
 - Falls back to CLI output for scripts, pipes, and automation
 - Uses an embedded libgit2 backend, so it does not depend on the `git` binary
-- Covers status, branch inspection, recent commit review, checkout, switch, branch creation, clone, pull, and push
+- Covers status, branch inspection, recent commit review, checkout, switch, branch creation, clone, fetch, pull, and push
 - Includes a branch-focused TUI with local/remote panels, branch search, branch deletion confirmation, branch-specific graph navigation, and commit actions
-- Shows a loading splash while the repository snapshot is being synchronized
+- Shows a loading splash while the local repository snapshot is being loaded
 
 ## Architecture
 
@@ -117,6 +117,7 @@ flowchart LR
 - In the local branch panel, branch actions include checkout, switch, pull, push, and creating a branch from the selected source
 - In the local branch panel, branch actions also include deleting the selected local branch after confirmation
 - In the remote branch panel, branch actions include creating a local branch, checking out detached HEAD, or deleting the selected remote branch after confirmation
+
 ### Graph view
 
 - `j/k` or arrow keys move between commits
@@ -144,6 +145,7 @@ The help screen is scrollable:
 | `gitrex switch <target>` | Switches to a branch |
 | `gitrex create-branch <name> --from <target>` | Creates a new branch, optionally from another ref |
 | `gitrex clone <repository> [directory]` | Clones a repository to an optional destination |
+| `gitrex fetch [remote]` | Explicitly refreshes and prunes remote-tracking refs |
 | `gitrex pull [remote] [branch]` | Pulls updates from a remote and branch |
 | `gitrex push [remote] [branch]` | Pushes commits to a remote and branch |
 | `gitrex tui` | Forces the TUI explicitly |
@@ -230,4 +232,5 @@ cargo test
 
 - The CLI path prints a help hint when no subcommand is provided outside an interactive terminal.
 - The TUI is the primary interactive experience.
-- The TUI refreshes remote refs before reading status, branches, and history so the snapshot stays consistent.
+- Read-only commands and TUI snapshots do not perform network I/O implicitly.
+- Run `gitrex fetch` when you want to refresh remote-tracking refs explicitly.
