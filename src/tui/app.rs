@@ -365,7 +365,9 @@ impl App {
             self.branch_panel,
             self.selected_branch(),
             self.selected_remote_branch(),
-            self.status.as_ref().map(|status| status.branch_name.as_str()),
+            self.status
+                .as_ref()
+                .map(|status| status.branch_name.as_str()),
         )
     }
 
@@ -374,7 +376,9 @@ impl App {
             self.branch_panel,
             self.selected_branch(),
             self.selected_remote_branch(),
-            self.status.as_ref().map(|status| status.branch_name.as_str()),
+            self.status
+                .as_ref()
+                .map(|status| status.branch_name.as_str()),
         )
     }
 
@@ -1046,16 +1050,27 @@ impl App {
             .into_iter()
             .map(|branch| {
                 let marker = if branch.current { "●" } else { " " };
-                let synced = catalog
+                let relation = catalog
                     .locals
                     .iter()
                     .find(|entry| entry.branch.name == branch.name)
-                    .map(|entry| entry.synced_remotes.clone())
-                    .unwrap_or_default();
-                let sync_label = if synced.is_empty() {
-                    String::from(" [local-only]")
-                } else {
-                    format!(" [synced: {}]", synced.join(", "))
+                    .map(|entry| (&entry.synced_remotes, &entry.differing_remotes));
+                let sync_label = match relation {
+                    None => String::from(" [local-only]"),
+                    Some((synced, differing)) if synced.is_empty() && differing.is_empty() => {
+                        String::from(" [local-only]")
+                    }
+                    Some((synced, differing)) if differing.is_empty() => {
+                        format!(" [synced: {}]", synced.join(", "))
+                    }
+                    Some((synced, differing)) if synced.is_empty() => {
+                        format!(" [differs: {}]", differing.join(", "))
+                    }
+                    Some((synced, differing)) => format!(
+                        " [synced: {}; differs: {}]",
+                        synced.join(", "),
+                        differing.join(", ")
+                    ),
                 };
                 let text = format!("{marker} {}{sync_label}", branch.name);
                 let style = if branch.current {
@@ -1890,5 +1905,316 @@ mod tests {
         app.close_delete_branch_confirm();
         assert!(!app.delete_branch_confirm_is_open());
         assert_eq!(app.delete_branch_target(), None);
+    }
+
+    fn populated_app() -> App {
+        let mut app = App::new();
+        app.status = Some(RepoStatus {
+            branch_name: "main".to_string(),
+            upstream: Some("origin/main".to_string()),
+            ahead: 1,
+            behind: 2,
+            files: vec![crate::domain::StatusEntry {
+                code: " M".to_string(),
+                path: "README.md".to_string(),
+            }],
+        });
+        app.branches = vec![
+            BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: Some("origin/main".to_string()),
+                commit: "1111111111111111111111111111111111111111".to_string(),
+                subject: "main work".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "feature/login".to_string(),
+                current: false,
+                upstream: None,
+                commit: "2222222222222222222222222222222222222222".to_string(),
+                subject: "feature work".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "1111111111111111111111111111111111111111".to_string(),
+                subject: "main work".to_string(),
+                kind: BranchKind::Remote,
+            },
+            BranchInfo {
+                name: "upstream/main".to_string(),
+                current: false,
+                upstream: None,
+                commit: "3333333333333333333333333333333333333333".to_string(),
+                subject: "different main".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+        let first = crate::domain::CommitSummary {
+            hash: "1111111111111111111111111111111111111111".to_string(),
+            author: "Marcos".to_string(),
+            date: "2026-08-09".to_string(),
+            subject: "A deliberately long commit subject that exercises scrolling".to_string(),
+        };
+        let second = crate::domain::CommitSummary {
+            hash: "2222222222222222222222222222222222222222".to_string(),
+            author: "Marcos".to_string(),
+            date: "2026-08-08".to_string(),
+            subject: "previous commit".to_string(),
+        };
+        app.log = vec![first.clone(), second.clone()];
+        app.graph = vec![
+            crate::domain::GraphLine::Commit {
+                graph: "*".to_string(),
+                summary: first,
+            },
+            crate::domain::GraphLine::Connector {
+                graph: "|".to_string(),
+            },
+            crate::domain::GraphLine::Commit {
+                graph: "*".to_string(),
+                summary: second,
+            },
+        ];
+        app.selected_branch = Some("main".to_string());
+        app.selected_remote_branch = Some("refs/remotes/origin/main".to_string());
+        app
+    }
+
+    fn render_text(app: &mut App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
+    #[test]
+    fn render_exercises_dashboard_views_overlays_help_and_loading() {
+        let mut app = populated_app();
+
+        app.select_view(View::Branches);
+        let dashboard = render_text(&mut app, 120, 40);
+        assert!(dashboard.contains("Remote branches"));
+        assert!(dashboard.contains("Local branches"));
+        assert!(dashboard.contains("Git Graph"));
+        assert!(dashboard.contains("main"));
+
+        app.select_view(View::Status);
+        assert!(render_text(&mut app, 120, 40).contains("Status"));
+        app.select_view(View::Log);
+        app.advance_graph_scroll();
+        assert!(render_text(&mut app, 120, 40).contains("Git Graph"));
+
+        app.select_view(View::Branches);
+        app.set_branch_panel(BranchPanel::Local);
+        app.open_picker();
+        assert!(render_text(&mut app, 120, 40).contains("Branch Actions"));
+        app.move_picker(99);
+        app.move_picker(-99);
+        app.close_picker();
+
+        app.set_branch_panel(BranchPanel::Remote);
+        app.open_remote_picker();
+        assert!(render_text(&mut app, 120, 40).contains("Remote Branch Actions"));
+        app.move_remote_picker(99);
+        app.move_remote_picker(-99);
+        app.close_remote_picker();
+
+        app.open_branch_creator_from_source("refs/remotes/origin/main".to_string(), theme::TEAL);
+        for ch in "feature/render".chars() {
+            app.push_branch_create_char(ch);
+        }
+        assert!(render_text(&mut app, 120, 40).contains("Create Branch"));
+        app.pop_branch_create_char();
+        app.close_branch_creator();
+
+        app.open_commit_actions();
+        app.move_commit_action(1);
+        assert!(render_text(&mut app, 120, 40).contains("Commit Actions"));
+        app.move_commit_action(-1);
+        app.close_commit_actions();
+
+        app.open_delete_branch_confirm(DeleteBranchTarget::Local {
+            branch: "feature/login".to_string(),
+        });
+        assert!(render_text(&mut app, 120, 40).contains("Delete Local Branch"));
+        app.close_delete_branch_confirm();
+
+        app.open_delete_branch_confirm(DeleteBranchTarget::Remote {
+            remote: "origin".to_string(),
+            branch: "feature/login".to_string(),
+        });
+        assert!(render_text(&mut app, 120, 40).contains("Delete Remote Branch"));
+        app.close_delete_branch_confirm();
+
+        app.delete_branch_confirm_open = true;
+        app.delete_branch_target = None;
+        assert!(render_text(&mut app, 120, 40).contains("Delete Branch"));
+        app.close_delete_branch_confirm();
+
+        app.open_branch_search();
+        for ch in "main".chars() {
+            app.push_branch_search_char(ch);
+        }
+        assert!(render_text(&mut app, 120, 40).contains("Search branches"));
+        app.pop_branch_search_char();
+        app.close_branch_search();
+
+        app.open_help();
+        app.move_help_scroll(500);
+        let help = render_text(&mut app, 72, 18);
+        assert!(help.contains("gitrex help"));
+        assert!(app.help_scroll_offset > 0);
+        let wide_help = render_text(&mut app, 180, 60);
+        assert!(wide_help.contains("Shortcuts"));
+        app.close_help();
+
+        for kind in [
+            MessageKind::Info,
+            MessageKind::Success,
+            MessageKind::Warning,
+            MessageKind::Error,
+        ] {
+            app.set_feedback("message", kind);
+            assert!(render_text(&mut app, 120, 40).contains("message"));
+        }
+
+        let mut empty = App::new();
+        let empty_dashboard = render_text(&mut empty, 120, 40);
+        assert!(empty_dashboard.contains("No repository loaded"));
+        assert!(empty_dashboard.contains("No local branches"));
+        assert!(empty_dashboard.contains("No remote branches"));
+
+        let mut loading = App::new();
+        loading.start_loading("Loading repository");
+        loading.advance_loading_frame();
+        let splash = render_text(&mut loading, 90, 28);
+        assert!(!splash.trim().is_empty());
+        assert_eq!(loading.loading_frame, 1);
+        loading.stop_loading();
+    }
+
+    #[test]
+    fn state_edge_cases_cover_empty_filters_snapshots_and_input_guards() {
+        let mut app = App::new();
+
+        assert!(app.selected_branch().is_none());
+        assert!(app.selected_remote_branch().is_none());
+        assert!(app.selected_commit().is_none());
+        assert!(app.selected_graph_ref().is_none());
+        assert!(app.selected_graph_label().is_none());
+        assert!(app.sync_target_display().is_none());
+
+        app.move_selection(1);
+        assert!(app.selected_branch.is_none());
+        app.set_branch_panel(BranchPanel::Remote);
+        app.move_selection(-1);
+        assert!(app.selected_remote_branch.is_none());
+        app.move_commit_selection(1);
+        app.advance_graph_scroll();
+        assert_eq!(app.selected_commit, 0);
+        assert_eq!(app.graph_scroll_offset, 0);
+
+        app.open_picker();
+        assert!(!app.picker_open);
+        assert_eq!(app.message_kind, MessageKind::Warning);
+        app.open_remote_picker();
+        assert!(!app.remote_picker_open);
+        app.open_commit_actions();
+        assert!(!app.commit_actions_open);
+        app.open_branch_creator();
+        assert!(!app.branch_create_open);
+
+        app.push_branch_search_char('x');
+        app.pop_branch_search_char();
+        assert!(!app.confirm_branch_search());
+        app.open_branch_search();
+        app.push_branch_search_char('x');
+        app.push_branch_search_char('\n');
+        app.pop_branch_search_char();
+        assert!(!app.confirm_branch_search());
+        app.close_branch_search();
+
+        app.push_branch_create_char('x');
+        app.pop_branch_create_char();
+        assert!(app.branch_create_request().is_none());
+        app.open_branch_creator_from_source("main".to_string(), theme::SUCCESS);
+        app.push_branch_create_char(' ');
+        assert!(app.branch_create_request().is_none());
+        app.push_branch_create_char('x');
+        assert_eq!(
+            app.branch_create_request(),
+            Some(("x".to_string(), "main".to_string()))
+        );
+        app.pop_branch_create_char();
+        app.close_branch_creator();
+
+        app.open_help();
+        app.open_help();
+        app.select_view(View::Branches);
+        app.close_help();
+        app.close_help();
+        assert_eq!(app.view, View::Branches);
+
+        app.status = Some(RepoStatus {
+            branch_name: "main".to_string(),
+            upstream: Some("origin/main".to_string()),
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+        });
+        assert_eq!(app.sync_target_display().as_deref(), Some("origin/main"));
+        app.start_loading("noop");
+        app.advance_loading_frame();
+        assert_eq!(app.loading_frame, 0);
+        app.stop_loading();
+
+        let summary = crate::domain::CommitSummary {
+            hash: "abc".to_string(),
+            author: "Marcos".to_string(),
+            date: "2026-08-09".to_string(),
+            subject: "snapshot".to_string(),
+        };
+        let history =
+            crate::domain::BranchHistory::from_graph(vec![crate::domain::GraphLine::Commit {
+                graph: "*".to_string(),
+                summary: summary.clone(),
+            }]);
+        app.apply_snapshot(crate::domain::RepoSnapshot {
+            status: RepoStatus {
+                branch_name: "main".to_string(),
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                files: Vec::new(),
+            },
+            branches: vec![BranchInfo {
+                name: "main".to_string(),
+                current: true,
+                upstream: None,
+                commit: "abc".to_string(),
+                subject: "snapshot".to_string(),
+                kind: BranchKind::Local,
+            }],
+            history: history.clone(),
+            selected_branch: Some("main".to_string()),
+        });
+        assert_eq!(app.selected_commit().unwrap().subject, "snapshot");
+
+        app.graph_scroll_offset = 12;
+        app.selected_commit = 8;
+        app.apply_graph_history(history);
+        assert_eq!(app.selected_commit, 0);
+        assert_eq!(app.graph_scroll_offset, 0);
     }
 }

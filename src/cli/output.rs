@@ -35,10 +35,18 @@ pub fn print_branches(branches: &[BranchInfo]) {
     println!("local branches:");
     for entry in &catalog.locals {
         let marker = if entry.branch.current { "*" } else { " " };
-        let status = if entry.synced_remotes.is_empty() {
-            String::from("local-only")
-        } else {
-            format!("synced: {}", entry.synced_remotes.join(", "))
+        let status = match (
+            entry.synced_remotes.is_empty(),
+            entry.differing_remotes.is_empty(),
+        ) {
+            (true, true) => String::from("local-only"),
+            (false, true) => format!("synced: {}", entry.synced_remotes.join(", ")),
+            (true, false) => format!("differs: {}", entry.differing_remotes.join(", ")),
+            (false, false) => format!(
+                "synced: {}; differs: {}",
+                entry.synced_remotes.join(", "),
+                entry.differing_remotes.join(", ")
+            ),
         };
         println!("{marker} {} [{}]", entry.branch.name, status);
     }
@@ -89,10 +97,18 @@ pub fn render_branch_preview(branches: &[BranchInfo]) -> Vec<String> {
     lines.push(String::from("local branches:"));
     for entry in catalog.locals.iter().take(4) {
         let marker = if entry.branch.current { "*" } else { " " };
-        let status = if entry.synced_remotes.is_empty() {
-            String::from("local-only")
-        } else {
-            format!("synced: {}", entry.synced_remotes.join(", "))
+        let status = match (
+            entry.synced_remotes.is_empty(),
+            entry.differing_remotes.is_empty(),
+        ) {
+            (true, true) => String::from("local-only"),
+            (false, true) => format!("synced: {}", entry.synced_remotes.join(", ")),
+            (true, false) => format!("differs: {}", entry.differing_remotes.join(", ")),
+            (false, false) => format!(
+                "synced: {}; differs: {}",
+                entry.synced_remotes.join(", "),
+                entry.differing_remotes.join(", ")
+            ),
         };
         lines.push(format!("{marker} {} [{status}]", entry.branch.name));
     }
@@ -118,8 +134,7 @@ pub fn render_graph_rows(
     let content_width = width.saturating_sub(2) as usize;
     let mut commit_index = 0usize;
     rows.iter()
-        .enumerate()
-        .map(|(_, row)| match row {
+        .map(|row| match row {
             GraphLine::Connector { graph } => render_graph_connector(graph),
             GraphLine::Commit { graph, summary } => {
                 let line = render_graph_line(

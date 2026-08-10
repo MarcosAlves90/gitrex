@@ -71,6 +71,7 @@ pub struct RemoteBranchGroup {
 pub struct LocalBranchEntry {
     pub branch: BranchInfo,
     pub synced_remotes: Vec<String>,
+    pub differing_remotes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,11 +81,12 @@ pub struct BranchCatalog {
 }
 
 pub fn build_branch_catalog(branches: &[BranchInfo]) -> BranchCatalog {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
 
     let mut remote_groups: BTreeMap<String, Vec<BranchInfo>> = BTreeMap::new();
     let mut local_branches = Vec::new();
-    let mut remote_matches: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut remote_matches: BTreeMap<String, Vec<BranchInfo>> = BTreeMap::new();
+    let mut remote_by_name: BTreeMap<String, BranchInfo> = BTreeMap::new();
 
     for branch in branches.iter().cloned() {
         match branch.kind {
@@ -104,14 +106,11 @@ pub fn build_branch_catalog(branches: &[BranchInfo]) -> BranchCatalog {
 
     for group in remote_groups.values() {
         for branch in group {
+            remote_by_name.insert(branch.display_name(), branch.clone());
             remote_matches
                 .entry(branch.branch_short_name().to_string())
                 .or_default()
-                .insert(format!(
-                    "{}/{}",
-                    branch.remote_name().unwrap_or("remote"),
-                    branch.branch_short_name()
-                ));
+                .push(branch.clone());
         }
     }
 
@@ -140,18 +139,38 @@ pub fn build_branch_catalog(branches: &[BranchInfo]) -> BranchCatalog {
     let locals = local_branches
         .into_iter()
         .map(|branch| {
-            let mut synced_remotes = remote_matches
+            let same_name_remotes = remote_matches
                 .get(branch.name.as_str())
-                .map(|remotes| remotes.iter().cloned().collect::<Vec<_>>())
+                .map(Vec::as_slice)
                 .unwrap_or_default();
+            let mut synced_remotes = same_name_remotes
+                .iter()
+                .filter(|remote| remote.commit == branch.commit)
+                .map(BranchInfo::display_name)
+                .collect::<Vec<_>>();
+            let mut differing_remotes = same_name_remotes
+                .iter()
+                .filter(|remote| remote.commit != branch.commit)
+                .map(BranchInfo::display_name)
+                .collect::<Vec<_>>();
+
             if let Some(upstream) = branch.upstream.as_deref() {
-                synced_remotes.push(upstream.to_string());
+                if let Some(remote) = remote_by_name.get(upstream) {
+                    if remote.commit == branch.commit {
+                        synced_remotes.push(upstream.to_string());
+                    } else {
+                        differing_remotes.push(upstream.to_string());
+                    }
+                }
             }
             synced_remotes.sort();
             synced_remotes.dedup();
+            differing_remotes.sort();
+            differing_remotes.dedup();
             LocalBranchEntry {
                 branch,
                 synced_remotes,
+                differing_remotes,
             }
         })
         .collect::<Vec<_>>();
@@ -258,5 +277,65 @@ mod tests {
         assert!(!catalog.locals[2].synced_remotes.is_empty());
         assert_eq!(catalog.remotes[0].remote, "origin");
         assert_eq!(catalog.remotes[1].remote, "upstream");
+    }
+
+    #[test]
+    fn branch_catalog_marks_different_tips_as_different_not_synced() {
+        let branches = vec![
+            BranchInfo {
+                name: "feature/login".to_string(),
+                current: true,
+                upstream: Some("origin/feature/login".to_string()),
+                commit: "local-tip".to_string(),
+                subject: "Local work".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/feature/login".to_string(),
+                current: false,
+                upstream: None,
+                commit: "remote-tip".to_string(),
+                subject: "Remote work".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+
+        let catalog = build_branch_catalog(&branches);
+
+        assert!(catalog.locals[0].synced_remotes.is_empty());
+        assert_eq!(
+            catalog.locals[0].differing_remotes,
+            vec!["origin/feature/login".to_string()]
+        );
+    }
+
+    #[test]
+    fn branch_catalog_calls_equal_tips_synced() {
+        let branches = vec![
+            BranchInfo {
+                name: "feature/login".to_string(),
+                current: true,
+                upstream: Some("origin/feature/login".to_string()),
+                commit: "same-tip".to_string(),
+                subject: "Local work".to_string(),
+                kind: BranchKind::Local,
+            },
+            BranchInfo {
+                name: "origin/feature/login".to_string(),
+                current: false,
+                upstream: None,
+                commit: "same-tip".to_string(),
+                subject: "Remote work".to_string(),
+                kind: BranchKind::Remote,
+            },
+        ];
+
+        let catalog = build_branch_catalog(&branches);
+
+        assert_eq!(
+            catalog.locals[0].synced_remotes,
+            vec!["origin/feature/login".to_string()]
+        );
+        assert!(catalog.locals[0].differing_remotes.is_empty());
     }
 }
