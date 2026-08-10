@@ -42,7 +42,8 @@
 
 - Defaults to the TUI when both `stdin` and `stdout` are terminals
 - Falls back to CLI output for scripts, pipes, and automation
-- Uses an embedded libgit2 backend, so it does not depend on the `git` binary
+- Uses the installed `git` executable for repository inspection and safe local branch deletion
+- Temporarily retains libgit2 only for mutation paths that have not migrated yet
 - Covers status, branch inspection, recent commit review, checkout, switch, branch creation, clone, fetch, pull, and push
 - Includes a branch-focused TUI with local/remote panels, branch search, branch deletion confirmation, branch-specific graph navigation, and commit actions
 - Shows a loading splash while the local repository snapshot is being loaded
@@ -223,7 +224,8 @@ cargo test
 - Rust 2021
 - `clap` for CLI parsing
 - `crossterm` for terminal control
-- `git2` with vendored libgit2 for repository access
+- system Git for repository inspection and selected safety-critical operations
+- `git2` temporarily for mutation paths still being migrated
 - `chrono` for date formatting
 - `ratatui` for the TUI
 - `anyhow` and `thiserror` for error handling
