@@ -29,14 +29,12 @@ pub fn run(client: GitClient) -> anyhow::Result<()> {
     let _cleanup = TerminalCleanup;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let refresh_client = <GitClient as Clone>::clone(&client);
     let mut controller = controller::TuiController::new(client);
 
-    controller
-        .app_mut()
-        .start_loading("Synchronizing repository");
+    controller.app_mut().start_loading("Loading repository");
 
     let (snapshot_tx, snapshot_rx) = mpsc::channel();
-    let refresh_client = GitClient::new();
     thread::spawn(move || {
         let _ = snapshot_tx.send(refresh_client.snapshot());
     });
@@ -50,7 +48,7 @@ pub fn run(client: GitClient) -> anyhow::Result<()> {
                 controller.app_mut().apply_snapshot(snapshot);
                 controller
                     .app_mut()
-                    .set_feedback("Repository refreshed.", app::MessageKind::Success);
+                    .set_feedback("Repository loaded.", app::MessageKind::Success);
                 controller.app_mut().stop_loading();
                 break;
             }
@@ -73,13 +71,11 @@ pub fn run(client: GitClient) -> anyhow::Result<()> {
             }
         }
 
-        if event::poll(Duration::from_millis(80))? {
-            if controller.handle_event(event::read()?)? {
-                disable_raw_mode()?;
-                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                terminal.show_cursor()?;
-                return Ok(());
-            }
+        if event::poll(Duration::from_millis(80))? && controller.handle_event(event::read()?)? {
+            disable_raw_mode()?;
+            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+            terminal.show_cursor()?;
+            return Ok(());
         }
     }
 
@@ -88,10 +84,8 @@ pub fn run(client: GitClient) -> anyhow::Result<()> {
         controller.tick();
         terminal.draw(|frame| controller.app_mut().render(frame))?;
 
-        if event::poll(Duration::from_millis(150))? {
-            if controller.handle_event(event::read()?)? {
-                break Ok(());
-            }
+        if event::poll(Duration::from_millis(150))? && controller.handle_event(event::read()?)? {
+            break Ok(());
         }
     };
 

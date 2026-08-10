@@ -32,6 +32,9 @@ pub enum Commands {
         repository: String,
         directory: Option<PathBuf>,
     },
+    Fetch {
+        remote: Option<String>,
+    },
     Pull {
         remote: Option<String>,
         branch: Option<String>,

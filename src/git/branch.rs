@@ -2,8 +2,8 @@ use git2::{BranchType, Repository};
 
 use crate::domain::{BranchInfo, BranchKind};
 
+use super::shared::map_error;
 use super::GitClient;
-use super::shared::{map_error, short_oid};
 
 pub fn list_branches(client: &GitClient) -> crate::domain::Result<Vec<BranchInfo>> {
     let repo = client.repo()?;
@@ -72,7 +72,11 @@ fn collect_branches(
         if matches!(kind, BranchType::Remote) && name == "HEAD" {
             continue;
         }
-        let commit = branch.get().target().map(short_oid).unwrap_or_default();
+        let commit = branch
+            .get()
+            .target()
+            .map(|oid| oid.to_string())
+            .unwrap_or_default();
         let subject = branch
             .get()
             .peel_to_commit()

@@ -2,21 +2,47 @@ use std::path::{Path, PathBuf};
 
 use git2::{
     build::CheckoutBuilder, BranchType, Cred, CredentialType, ErrorCode, FetchOptions, FetchPrune,
-    ObjectType, Oid, PushOptions, RemoteCallbacks, Repository,
+    Oid, PushOptions, RemoteCallbacks, Repository,
 };
 
 use crate::domain::error::{GitError, Result};
 
-#[derive(Debug, Clone, Default)]
-pub struct GitClient;
+#[derive(Debug, Clone)]
+pub struct GitClient {
+    discovery_path: PathBuf,
+}
+
+impl Default for GitClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl GitClient {
     pub fn new() -> Self {
-        Self
+        let discovery_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self { discovery_path }
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        let discovery_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        };
+
+        Self { discovery_path }
+    }
+
+    pub fn discovery_path(&self) -> &Path {
+        &self.discovery_path
     }
 
     pub(crate) fn repo(&self) -> Result<Repository> {
-        Repository::discover(".").map_err(map_repo_error)
+        Repository::discover(&self.discovery_path).map_err(map_repo_error)
     }
 
     pub fn status(&self) -> Result<crate::domain::RepoStatus> {
@@ -24,19 +50,19 @@ impl GitClient {
     }
 
     pub fn refresh_remote_refs(&self) -> Result<()> {
-        let repo = self.repo()?;
-        let remotes = repo.remotes().map_err(map_git_error)?;
+        self.fetch(None)
+    }
 
-        for remote_name in remotes.iter().flatten() {
-            let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
-            let mut options = FetchOptions::new();
-            options.prune(FetchPrune::On);
-            options.remote_callbacks(remote_callbacks(&repo)?);
-            remote
-                .fetch(&[] as &[&str], Some(&mut options), None)
-                .map_err(map_git_error)?;
+    pub fn fetch(&self, remote_name: Option<&str>) -> Result<()> {
+        let repo = self.repo()?;
+        if let Some(remote_name) = remote_name {
+            return fetch_remote(&repo, remote_name);
         }
 
+        let remotes = repo.remotes().map_err(map_git_error)?;
+        for remote_name in remotes.iter().flatten() {
+            fetch_remote(&repo, remote_name)?;
+        }
         Ok(())
     }
 
@@ -58,41 +84,34 @@ impl GitClient {
 
     pub fn checkout(&self, target: &str) -> Result<()> {
         let repo = self.repo()?;
-        let mut builder = CheckoutBuilder::new();
-        builder.force();
 
-        if repo.find_branch(target, BranchType::Local).is_ok() {
+        if let Ok(branch) = repo.find_branch(target, BranchType::Local) {
+            let commit = branch.get().peel_to_commit().map_err(map_git_error)?;
+            ensure_checkout_safe(&repo, commit.as_object())?;
             repo.set_head(&format!("refs/heads/{target}"))
                 .map_err(map_git_error)?;
-            repo.checkout_head(Some(&mut builder))
-                .map_err(map_git_error)?;
+            checkout_head_safely(&repo)?;
             return Ok(());
         }
 
         let obj = repo.revparse_single(target).map_err(map_git_error)?;
-        if let Ok(commit) = obj.peel_to_commit() {
-            repo.set_head_detached(commit.id()).map_err(map_git_error)?;
-            repo.checkout_head(Some(&mut builder))
-                .map_err(map_git_error)?;
-            return Ok(());
-        }
-
-        let tree = obj.peel(ObjectType::Tree).map_err(map_git_error)?;
-        repo.checkout_tree(&tree, Some(&mut builder))
-            .map_err(map_git_error)?;
-        repo.set_head_detached(obj.id()).map_err(map_git_error)?;
+        let commit = obj.peel_to_commit().map_err(map_git_error)?;
+        ensure_checkout_safe(&repo, commit.as_object())?;
+        repo.set_head_detached(commit.id()).map_err(map_git_error)?;
+        checkout_head_safely(&repo)?;
         Ok(())
     }
 
     pub fn switch(&self, target: &str) -> Result<()> {
         let repo = self.repo()?;
-        let mut builder = CheckoutBuilder::new();
-        builder.force();
+        let branch = repo
+            .find_branch(target, BranchType::Local)
+            .map_err(map_git_error)?;
+        let commit = branch.get().peel_to_commit().map_err(map_git_error)?;
+        ensure_checkout_safe(&repo, commit.as_object())?;
         repo.set_head(&format!("refs/heads/{target}"))
             .map_err(map_git_error)?;
-        repo.checkout_head(Some(&mut builder))
-            .map_err(map_git_error)?;
-        Ok(())
+        checkout_head_safely(&repo)
     }
 
     pub fn create_branch(&self, branch: &str, start_point: Option<&str>) -> Result<()> {
@@ -168,26 +187,28 @@ impl GitClient {
             .find_reference(&format!("refs/heads/{branch_name}"))
             .map_err(map_git_error)?;
         let local_commit = local_ref.peel_to_commit().map_err(map_git_error)?;
+        let (ahead, behind) = repo
+            .graph_ahead_behind(local_commit.id(), remote_commit)
+            .map_err(map_git_error)?;
 
-        if repo
-            .graph_descendant_of(remote_commit, local_commit.id())
-            .map_err(map_git_error)?
-        {
-            local_ref
-                .set_target(remote_commit, "fast-forward")
-                .map_err(map_git_error)?;
-            let mut builder = CheckoutBuilder::new();
-            builder.force();
-            repo.set_head(&format!("refs/heads/{branch_name}"))
-                .map_err(map_git_error)?;
-            repo.checkout_head(Some(&mut builder))
-                .map_err(map_git_error)?;
+        if behind == 0 {
             return Ok(());
         }
 
-        Err(GitError::Backend(String::from(
-            "pull requires a fast-forward update",
-        )))
+        if ahead > 0 {
+            return Err(GitError::Backend(String::from(
+                "pull cannot fast-forward because local and remote histories have diverged",
+            )));
+        }
+
+        let remote_target = repo.find_commit(remote_commit).map_err(map_git_error)?;
+        ensure_checkout_safe(&repo, remote_target.as_object())?;
+        local_ref
+            .set_target(remote_commit, "fast-forward")
+            .map_err(map_git_error)?;
+        repo.set_head(&format!("refs/heads/{branch_name}"))
+            .map_err(map_git_error)?;
+        checkout_head_safely(&repo)
     }
 
     pub fn push(&self, remote: Option<&str>, branch: Option<&str>) -> Result<()> {
@@ -213,6 +234,30 @@ impl GitClient {
             .map_err(map_git_error)?;
         Ok(())
     }
+}
+
+fn fetch_remote(repo: &Repository, remote_name: &str) -> Result<()> {
+    let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
+    let mut options = FetchOptions::new();
+    options.prune(FetchPrune::On);
+    options.remote_callbacks(remote_callbacks(repo)?);
+    remote
+        .fetch(&[] as &[&str], Some(&mut options), None)
+        .map_err(map_git_error)
+}
+
+fn ensure_checkout_safe(repo: &Repository, target: &git2::Object<'_>) -> Result<()> {
+    let mut builder = CheckoutBuilder::new();
+    builder.safe().dry_run();
+    repo.checkout_tree(target, Some(&mut builder))
+        .map_err(map_git_error)
+}
+
+fn checkout_head_safely(repo: &Repository) -> Result<()> {
+    let mut builder = CheckoutBuilder::new();
+    builder.safe();
+    repo.checkout_head(Some(&mut builder))
+        .map_err(map_git_error)
 }
 
 fn remote_callbacks(repo: &Repository) -> Result<RemoteCallbacks<'static>> {

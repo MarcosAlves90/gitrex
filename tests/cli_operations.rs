@@ -221,6 +221,10 @@ fn cli_branch_refresh_removes_deleted_remote_refs() {
         .unwrap();
     remote_feature.delete().unwrap();
 
+    assert_gitrex(&worktree, &["fetch", "origin"])
+        .success()
+        .stdout(predicates::str::contains("fetch complete"));
+
     assert_gitrex(&worktree, &["branch"])
         .success()
         .stdout(predicates::str::contains("remote branches:"))

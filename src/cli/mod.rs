@@ -7,14 +7,8 @@ pub use args::{Cli, Commands};
 
 pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<()> {
     match command {
-        Some(Commands::Status) => {
-            client.refresh_remote_refs()?;
-            output::print_status(&client.status()?)
-        }
-        Some(Commands::Branch) => {
-            client.refresh_remote_refs()?;
-            output::print_branches(&client.branches()?)
-        }
+        Some(Commands::Status) => output::print_status(&client.status()?),
+        Some(Commands::Branch) => output::print_branches(&client.branches()?),
         Some(Commands::Log { limit }) => output::print_log(&client.log(limit)?),
         Some(Commands::Checkout { target }) => {
             client.checkout(&target)?;
@@ -37,6 +31,10 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
         }) => {
             client.clone(&repository, directory.as_deref())?;
             output::print_message("clone complete");
+        }
+        Some(Commands::Fetch { remote }) => {
+            client.fetch(remote.as_deref())?;
+            output::print_message("fetch complete");
         }
         Some(Commands::Pull { remote, branch }) => {
             client.pull(remote.as_deref(), branch.as_deref())?;
