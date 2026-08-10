@@ -1,8 +1,6 @@
-use std::path::{Path, PathBuf};
-
-use git2::{
-    build::CheckoutBuilder, BranchType, Cred, CredentialType, ErrorCode, FetchOptions, FetchPrune,
-    Oid, PushOptions, RemoteCallbacks, Repository,
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
 };
 
 use crate::domain::error::{GitError, Result};
@@ -41,12 +39,32 @@ impl GitClient {
         &self.discovery_path
     }
 
-    pub(crate) fn repo(&self) -> Result<Repository> {
-        Repository::discover(&self.discovery_path).map_err(map_repo_error)
-    }
-
     pub(crate) fn git(&self) -> super::GitProcess {
         super::GitProcess::new(&self.discovery_path)
+    }
+
+    pub(crate) fn resolve_commit(&self, reference: &str) -> Result<String> {
+        let git = self.git();
+        git.ensure_repository()?;
+        let candidate = format!("{reference}^{{commit}}");
+        let output = git.probe([
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            candidate.as_str(),
+        ])?;
+        if !output.success() {
+            return Err(GitError::ReferenceNotFound(reference.to_string()));
+        }
+
+        let oid = String::from_utf8(output.stdout).map_err(|_| GitError::Utf8)?;
+        let oid = oid.trim();
+        if oid.is_empty() {
+            return Err(GitError::Parse(format!(
+                "empty object id for reference {reference}"
+            )));
+        }
+        Ok(oid.to_string())
     }
 
     pub fn status(&self) -> Result<crate::domain::RepoStatus> {
@@ -58,14 +76,15 @@ impl GitClient {
     }
 
     pub fn fetch(&self, remote_name: Option<&str>) -> Result<()> {
-        let repo = self.repo()?;
-        if let Some(remote_name) = remote_name {
-            return fetch_remote(&repo, remote_name);
-        }
-
-        let remotes = repo.remotes().map_err(map_git_error)?;
-        for remote_name in remotes.iter().flatten() {
-            fetch_remote(&repo, remote_name)?;
+        let git = self.git();
+        git.ensure_repository()?;
+        match remote_name {
+            Some(remote_name) => {
+                git.run(["fetch", "--prune", "--", remote_name])?;
+            }
+            None => {
+                git.run(["fetch", "--all", "--prune"])?;
+            }
         }
         Ok(())
     }
@@ -87,265 +106,174 @@ impl GitClient {
     }
 
     pub fn checkout(&self, target: &str) -> Result<()> {
-        let repo = self.repo()?;
+        let git = self.git();
+        git.ensure_repository()?;
+        let local_ref = format!("refs/heads/{target}");
+        let local_branch = git.probe(["show-ref", "--verify", "--quiet", local_ref.as_str()])?;
 
-        if let Ok(branch) = repo.find_branch(target, BranchType::Local) {
-            let commit = branch.get().peel_to_commit().map_err(map_git_error)?;
-            ensure_checkout_safe(&repo, commit.as_object())?;
-            repo.set_head(&format!("refs/heads/{target}"))
-                .map_err(map_git_error)?;
-            checkout_head_safely(&repo)?;
+        if local_branch.success() {
+            git.run(["switch", "--", target])?;
             return Ok(());
         }
 
-        let obj = repo.revparse_single(target).map_err(map_git_error)?;
-        let commit = obj.peel_to_commit().map_err(map_git_error)?;
-        ensure_checkout_safe(&repo, commit.as_object())?;
-        repo.set_head_detached(commit.id()).map_err(map_git_error)?;
-        checkout_head_safely(&repo)?;
+        self.resolve_commit(target)?;
+        git.run(["switch", "--detach", "--", target])?;
         Ok(())
     }
 
     pub fn switch(&self, target: &str) -> Result<()> {
-        let repo = self.repo()?;
-        let branch = repo
-            .find_branch(target, BranchType::Local)
-            .map_err(map_git_error)?;
-        let commit = branch.get().peel_to_commit().map_err(map_git_error)?;
-        ensure_checkout_safe(&repo, commit.as_object())?;
-        repo.set_head(&format!("refs/heads/{target}"))
-            .map_err(map_git_error)?;
-        checkout_head_safely(&repo)
+        let git = self.git();
+        git.ensure_repository()?;
+        let local_ref = format!("refs/heads/{target}");
+        let local_branch = git.probe(["show-ref", "--verify", "--quiet", local_ref.as_str()])?;
+        if !local_branch.success() {
+            return Err(GitError::ReferenceNotFound(target.to_string()));
+        }
+        git.run(["switch", "--", target])?;
+        Ok(())
     }
 
     pub fn create_branch(&self, branch: &str, start_point: Option<&str>) -> Result<()> {
-        let repo = self.repo()?;
-        let commit_oid = match start_point {
-            Some(reference) => resolve_commit_oid(&repo, reference)?,
-            None => repo
-                .head()
-                .map_err(map_git_error)?
-                .peel_to_commit()
-                .map_err(map_git_error)?
-                .id(),
-        };
-        let commit = repo.find_commit(commit_oid).map_err(map_git_error)?;
-        repo.branch(branch, &commit, false).map_err(map_git_error)?;
-        self.switch(branch)
+        let git = self.git();
+        git.ensure_repository()?;
+        let mut args = vec![
+            OsString::from("switch"),
+            OsString::from("-c"),
+            OsString::from(branch),
+        ];
+        if let Some(start_point) = start_point {
+            args.push(OsString::from("--"));
+            args.push(OsString::from(start_point));
+        }
+        git.run(args)?;
+        Ok(())
     }
 
     pub fn delete_local_branch(&self, branch: &str) -> Result<()> {
-        self.git().ensure_repository()?;
-        self.git().run(["branch", "-d", "--", branch])?;
+        let git = self.git();
+        git.ensure_repository()?;
+        git.run(["branch", "-d", "--", branch])?;
         Ok(())
     }
 
     pub fn delete_remote_branch(&self, remote: &str, branch: &str) -> Result<()> {
-        let repo = self.repo()?;
-        let mut remote = repo.find_remote(remote).map_err(map_git_error)?;
-
-        let mut options = PushOptions::new();
-        options.remote_callbacks(remote_callbacks(&repo)?);
-        let refspec = format!(":refs/heads/{branch}");
-        remote
-            .push(&[refspec.as_str()], Some(&mut options))
-            .map_err(map_git_error)?;
+        let git = self.git();
+        git.ensure_repository()?;
+        git.run(["push", "--delete", "--", remote, branch])?;
         Ok(())
     }
 
     pub fn clone_repository(&self, repository: &str, directory: Option<&Path>) -> Result<()> {
+        let git = self.git();
         let path = match directory {
             Some(path) => path.to_path_buf(),
             None => default_clone_path(repository),
         };
-        Repository::clone(repository, &path).map_err(map_git_error)?;
+        let args = vec![
+            OsString::from("clone"),
+            OsString::from("--"),
+            OsString::from(repository),
+            path.as_os_str().to_os_string(),
+        ];
+        git.run(args)?;
         Ok(())
     }
 
     pub fn pull(&self, remote: Option<&str>, branch: Option<&str>) -> Result<()> {
-        let repo = self.repo()?;
-        let branch_name = branch
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                repo.head()
-                    .ok()
-                    .and_then(|head| head.shorthand().map(ToOwned::to_owned))
-            })
-            .ok_or(GitError::NotRepository)?;
-        let remote_name = remote.unwrap_or("origin");
+        let git = self.git();
+        git.ensure_repository()?;
 
-        let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
-        let mut options = FetchOptions::new();
-        options.remote_callbacks(remote_callbacks(&repo)?);
-        remote
-            .fetch(&[branch_name.as_str()], Some(&mut options), None)
-            .map_err(map_git_error)?;
-
-        let remote_ref_name = format!("refs/remotes/{remote_name}/{branch_name}");
-        let remote_commit = resolve_commit_oid(&repo, &remote_ref_name)?;
-
-        let mut local_ref = repo
-            .find_reference(&format!("refs/heads/{branch_name}"))
-            .map_err(map_git_error)?;
-        let local_commit = local_ref.peel_to_commit().map_err(map_git_error)?;
-        let (ahead, behind) = repo
-            .graph_ahead_behind(local_commit.id(), remote_commit)
-            .map_err(map_git_error)?;
-
-        if behind == 0 {
-            return Ok(());
+        match (remote, branch) {
+            (None, None) => {
+                git.run(["pull", "--ff-only"])?;
+            }
+            (Some(remote), None) => {
+                git.run(["pull", "--ff-only", "--", remote])?;
+            }
+            (remote, Some(branch)) => {
+                let remote = remote.unwrap_or("origin");
+                git.run(["fetch", "--prune", "--", remote, branch])?;
+                let (ahead, behind) = ahead_behind(&git, "HEAD", "FETCH_HEAD")?;
+                if behind == 0 {
+                    return Ok(());
+                }
+                if ahead > 0 {
+                    return Err(GitError::Diverged { ahead, behind });
+                }
+                git.run(["merge", "--ff-only", "FETCH_HEAD"])?;
+            }
         }
-
-        if ahead > 0 {
-            return Err(GitError::Backend(String::from(
-                "pull cannot fast-forward because local and remote histories have diverged",
-            )));
-        }
-
-        let remote_target = repo.find_commit(remote_commit).map_err(map_git_error)?;
-        ensure_checkout_safe(&repo, remote_target.as_object())?;
-        local_ref
-            .set_target(remote_commit, "fast-forward")
-            .map_err(map_git_error)?;
-        repo.set_head(&format!("refs/heads/{branch_name}"))
-            .map_err(map_git_error)?;
-        checkout_head_safely(&repo)
+        Ok(())
     }
 
     pub fn push(&self, remote: Option<&str>, branch: Option<&str>) -> Result<()> {
-        let repo = self.repo()?;
-        let branch_name = branch
-            .map(ToOwned::to_owned)
-            .or_else(|| {
-                repo.head()
-                    .ok()
-                    .and_then(|head| head.shorthand().map(ToOwned::to_owned))
-            })
-            .ok_or(GitError::NotRepository)?;
-        let remote_name = remote.unwrap_or("origin");
-        let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
+        let git = self.git();
+        git.ensure_repository()?;
 
-        let mut options = PushOptions::new();
-        options.remote_callbacks(remote_callbacks(&repo)?);
-        remote
-            .push(
-                &[format!("refs/heads/{branch_name}:refs/heads/{branch_name}")],
-                Some(&mut options),
-            )
-            .map_err(map_git_error)?;
+        match (remote, branch) {
+            (None, None) => {
+                git.run(["push"])?;
+            }
+            (Some(remote), None) => {
+                git.run(["push", "--", remote])?;
+            }
+            (remote, Some(branch)) => {
+                let remote = remote.unwrap_or("origin");
+                let refspec = format!("HEAD:refs/heads/{branch}");
+                git.run(["push", "--", remote, refspec.as_str()])?;
+            }
+        }
         Ok(())
     }
 }
 
-fn fetch_remote(repo: &Repository, remote_name: &str) -> Result<()> {
-    let mut remote = repo.find_remote(remote_name).map_err(map_git_error)?;
-    let mut options = FetchOptions::new();
-    options.prune(FetchPrune::On);
-    options.remote_callbacks(remote_callbacks(repo)?);
-    remote
-        .fetch(&[] as &[&str], Some(&mut options), None)
-        .map_err(map_git_error)
-}
-
-fn ensure_checkout_safe(repo: &Repository, target: &git2::Object<'_>) -> Result<()> {
-    let mut builder = CheckoutBuilder::new();
-    builder.safe().dry_run();
-    repo.checkout_tree(target, Some(&mut builder))
-        .map_err(map_git_error)
-}
-
-fn checkout_head_safely(repo: &Repository) -> Result<()> {
-    let mut builder = CheckoutBuilder::new();
-    builder.safe();
-    repo.checkout_head(Some(&mut builder))
-        .map_err(map_git_error)
-}
-
-fn remote_callbacks(repo: &Repository) -> Result<RemoteCallbacks<'static>> {
-    let config = repo.config().map_err(map_git_error)?;
-    let mut callbacks = RemoteCallbacks::new();
-    callbacks.credentials(move |url, username_from_url, allowed_types| {
-        resolve_credentials(&config, url, username_from_url, allowed_types)
-    });
-    Ok(callbacks)
-}
-
-fn resolve_credentials(
-    config: &git2::Config,
-    url: &str,
-    username_from_url: Option<&str>,
-    allowed_types: CredentialType,
-) -> std::result::Result<Cred, git2::Error> {
-    let username = username_from_url.unwrap_or("git");
-
-    if allowed_types.is_ssh_key() || url.starts_with("ssh://") || url.starts_with("git@") {
-        if let Ok(cred) = Cred::ssh_key_from_agent(username) {
-            return Ok(cred);
-        }
-    }
-
-    if allowed_types.is_user_pass_plaintext()
-        || allowed_types.is_username()
-        || allowed_types.is_default()
-    {
-        if let Ok(cred) = Cred::credential_helper(config, url, username_from_url) {
-            return Ok(cred);
-        }
-    }
-
-    if allowed_types.is_username() {
-        if let Ok(cred) = Cred::username(username) {
-            return Ok(cred);
-        }
-    }
-
-    if allowed_types.is_default() {
-        return Cred::default();
-    }
-
-    Err(git2::Error::from_str(
-        "unable to resolve local git credentials",
-    ))
-}
-
-fn resolve_commit_oid(repo: &Repository, reference: &str) -> Result<Oid> {
-    let object = repo.revparse_single(reference).map_err(map_git_error)?;
-    object
-        .peel_to_commit()
-        .map_err(map_git_error)
-        .map(|commit| commit.id())
+fn ahead_behind(git: &super::GitProcess, left: &str, right: &str) -> Result<(u32, u32)> {
+    let range = format!("{left}...{right}");
+    let output = git.run_text(["rev-list", "--left-right", "--count", range.as_str()])?;
+    let mut counts = output.split_whitespace();
+    let ahead = counts
+        .next()
+        .ok_or_else(|| GitError::Parse(String::from("missing ahead count")))?
+        .parse::<u32>()
+        .map_err(|_| GitError::Parse(String::from("invalid ahead count")))?;
+    let behind = counts
+        .next()
+        .ok_or_else(|| GitError::Parse(String::from("missing behind count")))?
+        .parse::<u32>()
+        .map_err(|_| GitError::Parse(String::from("invalid behind count")))?;
+    Ok((ahead, behind))
 }
 
 fn default_clone_path(repository: &str) -> PathBuf {
     let trimmed = repository.trim_end_matches('/');
     let name = trimmed
-        .rsplit('/')
+        .rsplit(['/', ':'])
         .next()
         .unwrap_or("repository")
         .trim_end_matches(".git");
     PathBuf::from(name)
 }
 
-fn map_repo_error(error: git2::Error) -> GitError {
-    if error.code() == ErrorCode::NotFound {
-        GitError::NotRepository
-    } else {
-        GitError::Backend(error.message().to_string())
-    }
-}
-
-fn map_git_error(error: git2::Error) -> GitError {
-    map_repo_error(error)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::GitClient;
+    use super::{default_clone_path, GitClient};
     use crate::test_support::{
         checkout_branch, clone_bare_repo, clone_repo, commit_all, configure_user, create_branch,
         current_dir_lock, init_repo, push_branch, set_remote_head, set_upstream, write_file,
         CurrentDirGuard,
     };
+
+    #[test]
+    fn default_clone_path_handles_https_and_scp_style_urls() {
+        assert_eq!(
+            default_clone_path("https://example.com/acme/project.git"),
+            std::path::PathBuf::from("project")
+        );
+        assert_eq!(
+            default_clone_path("git@example.com:acme/project.git"),
+            std::path::PathBuf::from("project")
+        );
+    }
 
     #[test]
     fn delete_local_branch_removes_ref_from_repository() {

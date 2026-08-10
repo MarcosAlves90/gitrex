@@ -32,12 +32,24 @@ impl GitProcess {
     }
 
     pub(crate) fn ensure_repository(&self) -> Result<()> {
-        let output = self.output(["rev-parse", "--git-dir"])?;
+        let output = self.probe(["rev-parse", "--git-dir"])?;
         if output.success() {
             Ok(())
         } else {
             Err(GitError::NotRepository)
         }
+    }
+
+    pub(crate) fn probe<I, S>(&self, args: I) -> Result<GitOutput>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let args = args
+            .into_iter()
+            .map(|value| value.as_ref().to_os_string())
+            .collect::<Vec<OsString>>();
+        self.output_args(&args)
     }
 
     pub(crate) fn run<I, S>(&self, args: I) -> Result<GitOutput>
@@ -74,23 +86,12 @@ impl GitProcess {
         String::from_utf8(output.stdout).map_err(|_| GitError::Utf8)
     }
 
-    fn output<I, S>(&self, args: I) -> Result<GitOutput>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        let args = args
-            .into_iter()
-            .map(|value| value.as_ref().to_os_string())
-            .collect::<Vec<_>>();
-        self.output_args(&args)
-    }
-
     fn output_args(&self, args: &[OsString]) -> Result<GitOutput> {
         let output = Command::new("git")
             .arg("-C")
             .arg(&self.repository)
             .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
             .output()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
@@ -127,6 +128,11 @@ mod tests {
         git.ensure_repository().unwrap();
         let output = git.run(["rev-parse", "--git-dir"]).unwrap();
         assert!(output.success());
+
+        let missing = git
+            .probe(["show-ref", "--verify", "--quiet", "refs/heads/missing"])
+            .unwrap();
+        assert!(!missing.success());
 
         let error = git
             .run(["rev-parse", "--verify", "missing-ref"])

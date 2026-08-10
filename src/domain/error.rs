@@ -16,6 +16,10 @@ pub enum GitError {
     Io(#[from] std::io::Error),
     #[error("repository not found")]
     NotRepository,
+    #[error("git reference not found: {0}")]
+    ReferenceNotFound(String),
+    #[error("pull cannot fast-forward because histories diverged (+{ahead} -{behind})")]
+    Diverged { ahead: u32, behind: u32 },
     #[error("git backend error: {0}")]
     Backend(String),
     #[error("failed to parse git output: {0}")]
