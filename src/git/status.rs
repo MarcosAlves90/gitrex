@@ -2,8 +2,8 @@ use git2::{Repository, Status, StatusOptions};
 
 use crate::domain::{RepoStatus, StatusEntry};
 
-use super::GitClient;
 use super::shared::map_error;
+use super::GitClient;
 
 pub fn read_status(client: &GitClient) -> crate::domain::Result<RepoStatus> {
     let repo = client.repo()?;

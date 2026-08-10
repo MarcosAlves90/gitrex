@@ -2,8 +2,8 @@ use git2::{Oid, Repository};
 
 use crate::domain::BranchHistory;
 
-use super::GitClient;
 use super::shared::{collect_history_commits, render_graph};
+use super::GitClient;
 
 pub fn read_branch_history(
     client: &GitClient,

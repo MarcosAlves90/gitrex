@@ -2,8 +2,8 @@ use git2::{Oid, Repository};
 
 use crate::domain::{CommitSummary, GraphLine};
 
-use super::GitClient;
 use super::shared::{collect_history_commits, map_error};
+use super::GitClient;
 
 pub fn read_log(client: &GitClient, limit: usize) -> crate::domain::Result<Vec<CommitSummary>> {
     let repo = client.repo()?;
