@@ -48,6 +48,12 @@ pub fn finish_operation(app: &mut App, outcome: OperationOutcome) -> anyhow::Res
             app.apply_snapshot(snapshot);
             app.set_feedback(message, MessageKind::Success);
         }
+        OperationOutcome::SuccessWithRefreshWarning { message, warning } => {
+            app.set_feedback(
+                format!("{message}. {warning}. Press r to refresh."),
+                MessageKind::Warning,
+            );
+        }
         OperationOutcome::Error(message) => {
             app.set_feedback(message, MessageKind::Error);
         }
@@ -126,6 +132,18 @@ mod tests {
         .unwrap();
         assert_eq!(app.message_kind, MessageKind::Success);
         assert_eq!(app.footer_text(), "done");
+
+        finish_operation(
+            &mut app,
+            OperationOutcome::SuccessWithRefreshWarning {
+                message: "Push complete".to_string(),
+                warning: "Repository view refresh failed: unavailable".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(app.message_kind, MessageKind::Warning);
+        assert!(app.footer_text().contains("Push complete"));
+        assert!(app.footer_text().contains("Press r to refresh"));
     }
 
     #[test]

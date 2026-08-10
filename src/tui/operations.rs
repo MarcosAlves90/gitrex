@@ -106,6 +106,10 @@ pub enum OperationOutcome {
         snapshot: RepoSnapshot,
         message: String,
     },
+    SuccessWithRefreshWarning {
+        message: String,
+        warning: String,
+    },
     Error(String),
 }
 
@@ -170,7 +174,10 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
                 snapshot,
                 message: success_message,
             },
-            Err(error) => OperationOutcome::Error(error.to_string()),
+            Err(error) => OperationOutcome::SuccessWithRefreshWarning {
+                message: success_message,
+                warning: format!("Repository view refresh failed: {error}"),
+            },
         },
         Err(error) => OperationOutcome::Error(error.to_string()),
     }

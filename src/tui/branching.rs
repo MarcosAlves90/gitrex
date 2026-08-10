@@ -159,6 +159,28 @@ pub fn selected_graph_label(
 pub fn current_sync_target(status: Option<&RepoStatus>) -> Option<(String, String)> {
     let status = status?;
     let upstream = status.upstream.as_deref()?;
-    let (remote, _) = upstream.split_once('/')?;
-    Some((remote.to_string(), status.branch_name.clone()))
+    let (remote, branch) = upstream.split_once('/')?;
+    Some((remote.to_string(), branch.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::current_sync_target;
+    use crate::domain::RepoStatus;
+
+    #[test]
+    fn sync_target_preserves_remote_branch_name_when_it_differs_from_local() {
+        let status = RepoStatus {
+            branch_name: "release-candidate".to_string(),
+            upstream: Some("origin/release".to_string()),
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+        };
+
+        assert_eq!(
+            current_sync_target(Some(&status)),
+            Some(("origin".to_string(), "release".to_string()))
+        );
+    }
 }
