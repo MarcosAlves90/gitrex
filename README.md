@@ -42,8 +42,8 @@
 
 - Defaults to the TUI when both `stdin` and `stdout` are terminals
 - Falls back to CLI output for scripts, pipes, and automation
-- Uses the installed `git` executable for repository inspection and safe local branch deletion
-- Temporarily retains libgit2 only for mutation paths that have not migrated yet
+- Uses the installed `git` executable for repository inspection and repository mutations
+- Retains libgit2 only inside the temporary test harness while that harness is being migrated
 - Covers status, branch inspection, recent commit review, checkout, switch, branch creation, clone, fetch, pull, and push
 - Includes a branch-focused TUI with local/remote panels, branch search, branch deletion confirmation, branch-specific graph navigation, and commit actions
 - Shows a loading splash while the local repository snapshot is being loaded
@@ -57,9 +57,10 @@ flowchart TD
   B -- no --> D[CLI commands]
   C --> E[App state + controller]
   D --> F[Command output]
-  E --> G[libgit2 backend]
+  E --> G[Git process adapter]
   F --> G
-  G --> H[Repository]
+  G --> H[System Git]
+  H --> I[Repository]
 ```
 
 ```mermaid
@@ -224,9 +225,8 @@ cargo test
 - Rust 2021
 - `clap` for CLI parsing
 - `crossterm` for terminal control
-- system Git for repository inspection and selected safety-critical operations
-- `git2` temporarily for mutation paths still being migrated
-- `chrono` for date formatting
+- system Git for repository inspection and mutation execution
+- `git2` temporarily as a development-only dependency for the test harness
 - `ratatui` for the TUI
 - `anyhow` and `thiserror` for error handling
 
@@ -236,3 +236,5 @@ cargo test
 - The TUI is the primary interactive experience.
 - Read-only commands and TUI snapshots do not perform network I/O implicitly.
 - Run `gitrex fetch` when you want to refresh remote-tracking refs explicitly.
+- Explicit pulls are fast-forward-only and reject diverged histories without moving local HEAD.
+- Captured Git commands disable terminal credential prompts and rely on configured credential helpers or agents.
