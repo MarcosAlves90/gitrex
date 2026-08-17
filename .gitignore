@@ -1,3 +1,45 @@
-/target
-/artifacts
+# Rust build output
+/target/
 *.rs.bk
+
+# Project-generated artifacts
+/artifacts/
+/coverage/
+lcov.info
+*.profraw
+
+# Local environment files
+.env
+.env.local
+.env.*.local
+
+# Logs and temporary editor files
+*.log
+*.swp
+*.swo
+*~
+
+# IDEs and editors
+.idea/
+.vscode/
+.fleet/
+*.iml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux desktop / filesystem noise
+.directory
+.Trash-*/
+.fuse_hidden*
