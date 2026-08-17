@@ -178,7 +178,6 @@ fn cli_can_push_and_pull_with_a_real_remote() {
         .success()
         .stdout(predicates::str::contains("push complete"));
 
-    let origin_repo = git2::Repository::open_bare(&origin).unwrap();
     assert!(origin_repo
         .find_reference("refs/heads/feature/login")
         .is_ok());

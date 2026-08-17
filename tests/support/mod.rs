@@ -100,7 +100,7 @@ impl TestRepo {
         Ok(TestHead { shorthand, target })
     }
 
-    pub fn find_branch(&self, branch: &str, _kind: git2::BranchType) -> Result<(), TestGitError> {
+    pub fn find_branch(&self, branch: &str) -> Result<(), TestGitError> {
         let reference = format!("refs/heads/{branch}");
         if self.reference_exists(&reference) {
             Ok(())

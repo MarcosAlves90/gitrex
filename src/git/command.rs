@@ -291,9 +291,7 @@ mod tests {
         let client = GitClient::new();
         client.delete_local_branch("feature/login").unwrap();
 
-        assert!(repo
-            .find_branch("feature/login", git2::BranchType::Local)
-            .is_err());
+        assert!(repo.find_branch("feature/login").is_err());
     }
 
     #[test]
@@ -316,9 +314,7 @@ mod tests {
         let client = GitClient::new();
         assert!(client.delete_local_branch("feature/unique").is_err());
 
-        assert!(repo
-            .find_branch("feature/unique", git2::BranchType::Local)
-            .is_ok());
+        assert!(repo.find_branch("feature/unique").is_ok());
     }
 
     #[test]
@@ -355,7 +351,6 @@ mod tests {
             .delete_remote_branch("origin", "feature/login")
             .unwrap();
 
-        let origin_repo = git2::Repository::open_bare(&origin).unwrap();
         assert!(origin_repo
             .find_reference("refs/heads/feature/login")
             .is_err());

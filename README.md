@@ -20,7 +20,7 @@
   <img src="https://img.shields.io/badge/Rust-20232A?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/Terminal-first-111827?style=for-the-badge" alt="Terminal-first" />
   <img src="https://img.shields.io/badge/TUI-Ratatui-0f766e?style=for-the-badge" alt="TUI" />
-  <img src="https://img.shields.io/badge/Git-libgit2-1f2937?style=for-the-badge" alt="Git backend" />
+  <img src="https://img.shields.io/badge/Git-system%20Git-1f2937?style=for-the-badge&logo=git&logoColor=white" alt="Git backend" />
 </p>
 
 <p align="center">
@@ -43,7 +43,7 @@
 - Defaults to the TUI when both `stdin` and `stdout` are terminals
 - Falls back to CLI output for scripts, pipes, and automation
 - Uses the installed `git` executable for repository inspection and repository mutations
-- Retains libgit2 only inside the temporary test harness while that harness is being migrated
+- Uses the installed `git` executable in both runtime operations and repository test fixtures
 - Covers status, branch inspection, recent commit review, checkout, switch, branch creation, clone, fetch, pull, and push
 - Includes a branch-focused TUI with local/remote panels, branch search, branch deletion confirmation, branch-specific graph navigation, and commit actions
 - Shows a loading splash while the local repository snapshot is being loaded
@@ -226,7 +226,7 @@ cargo test
 - `clap` for CLI parsing
 - `crossterm` for terminal control
 - system Git for repository inspection and mutation execution
-- `git2` temporarily as a development-only dependency for the test harness
+- system Git for repository test fixtures
 - `ratatui` for the TUI
 - `anyhow` and `thiserror` for error handling
 
