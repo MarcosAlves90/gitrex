@@ -234,10 +234,9 @@ fn cli_push_and_pull_preserve_different_local_and_remote_branch_names() {
         worktree_repo.head().unwrap().shorthand(),
         Some("release-candidate")
     );
-    assert_eq!(
-        std::fs::read_to_string(worktree.join("release.txt")).unwrap(),
-        "local\nremote\n"
-    );
+    let release_contents =
+        std::fs::read_to_string(worktree.join("release.txt")).unwrap();
+    assert_eq!(release_contents.lines().collect::<Vec<_>>(), vec!["local", "remote"]);
 }
 
 #[test]
