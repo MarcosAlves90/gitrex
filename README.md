@@ -121,7 +121,50 @@ The recommended installation uses Cargo directly from this repository and instal
    gitrex
    ```
 
-If `gitrex` is not found after installation, make sure Cargo's binary directory is on `PATH`: `~/.cargo/bin` on macOS/Linux or `%USERPROFILE%\.cargo\bin` on Windows.
+### `gitrex` is installed but not found
+
+Cargo installs command-line binaries in `~/.cargo/bin` on macOS/Linux and `%USERPROFILE%\.cargo\bin` on Windows.
+If `cargo install` reports that GitRex is already installed but the shell returns `command not found`, add Cargo's binary directory to `PATH`.
+
+For zsh on macOS or Linux:
+
+```bash
+grep -qxF 'export PATH="$HOME/.cargo/bin:$PATH"' ~/.zshrc \
+  || echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+rehash
+```
+
+For bash on Linux:
+
+```bash
+grep -qxF 'export PATH="$HOME/.cargo/bin:$PATH"' ~/.bashrc \
+  || echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+hash -r
+```
+
+Verify the installation:
+
+```bash
+command -v gitrex
+gitrex
+```
+
+For PowerShell on Windows:
+
+```powershell
+$cargoBin = Join-Path $HOME '.cargo\bin'
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (($userPath -split ';') -notcontains $cargoBin) {
+    [Environment]::SetEnvironmentVariable('Path', "$cargoBin;$userPath", 'User')
+}
+$env:Path = "$cargoBin;$env:Path"
+Get-Command gitrex
+gitrex
+```
+
+The PowerShell command updates the current session immediately and adds Cargo's binary directory to the user `PATH` for future terminal sessions.
 
 ## Architecture
 
