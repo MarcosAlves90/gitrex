@@ -1,20 +1,9 @@
-<div align="center">
-
-```text
-⠀⠀⠀⣴⣀⣤⣦⣤⣤⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⢠⣴⠿⠛⣿⣿⠋⠻⣿⣟⠻⠿⠿⢿⣿⣿⣶⣶⡦⣤⣀⡀⠀
-⢰⣿⣧⣴⣦⢿⣿⣷⡦⠘⣿⠀⠀⠀⠀⣹⠉⣿⣿⣿⣶⣬⣷⠀
-⠘⠟⢻⣿⠋⠀⢿⣿⣷⣼⣿⣷⣤⣤⣴⣿⣿⣿⣿⣿⣿⣿⢿⠃
-⠀⠀⢠⣿⣶⣶⣿⣿⣿⣿⠟⠉⠉⠙⠻⠟⡿⢻⢿⢻⡏⠏⠀⠀
-⠀⣾⣿⣿⣿⣿⣿⣿⣿⣧⣤⣀⡀⠀⠀⠀⠁⠈⠘⠈⠀⠀⠀⠀
-⠀⠈⠉⠳⣾⣿⣿⣿⣿⣿⣿⣿⣿⣦⣶⣄⢠⢰⣴⢠⠀⣄⠀⠀
-⠀⠀⠀⠀⠈⠙⠿⣿⣝⣿⣿⣿⣿⣿⣿⣿⣿⣾⣿⣿⣷⡟⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠈⠙⠛⠛⠛⠛⠛⠛⠛⠛⠻⠿⠟⠋⠀⠀⠀
-```
-
-</div>
 
 # gitrex
+
+<p align="center">
+  <img src="./gitrex-banner.png" alt="GitRex — terminal-first Git manager written in Rust" />
+</p>
 
 <p align="center" style="display: flex; justify-content: center; gap: 8px; flex-wrap: wrap;">
   <img src="https://img.shields.io/badge/Rust-20232A?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
@@ -30,6 +19,7 @@
 
 <p align="center">
   <a href="#overview">Overview</a> ·
+  <a href="#installation">Installation</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#tui">TUI</a> ·
   <a href="#commands">Commands</a> ·
@@ -47,6 +37,91 @@
 - Covers status, branch inspection, recent commit review, checkout, switch, branch creation, clone, fetch, pull, and push
 - Includes a branch-focused TUI with local/remote panels, branch search, branch deletion confirmation, branch-specific graph navigation, and commit actions
 - Shows a loading splash while the local repository snapshot is being loaded
+
+## Installation
+
+`gitrex` requires [Git](https://git-scm.com/) and a Rust toolchain with Cargo.
+The recommended installation uses Cargo directly from this repository and installs the executable as `gitrex`.
+
+### macOS
+
+1. Make sure Git is available. macOS can provide it through the Xcode Command Line Tools:
+
+   ```bash
+   xcode-select --install
+   ```
+
+2. Install Rust with `rustup` if `cargo` is not already available:
+
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   source "$HOME/.cargo/env"
+   ```
+
+3. Install GitRex:
+
+   ```bash
+   cargo install --git https://github.com/MarcosAlves90/gitrex --locked gitrex
+   ```
+
+4. Run it from any Git repository:
+
+   ```bash
+   gitrex
+   ```
+
+### Linux
+
+1. Install Git with your distribution package manager and verify that it is available:
+
+   ```bash
+   git --version
+   ```
+
+2. Install Rust with `rustup` if `cargo` is not already available:
+
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   source "$HOME/.cargo/env"
+   ```
+
+3. Install GitRex:
+
+   ```bash
+   cargo install --git https://github.com/MarcosAlves90/gitrex --locked gitrex
+   ```
+
+4. Run it from any Git repository:
+
+   ```bash
+   gitrex
+   ```
+
+### Windows
+
+1. Install Git and Rust with `winget` if they are not already available:
+
+   ```powershell
+   winget install --id Git.Git --source winget
+   winget install --id Rustlang.Rustup --source winget
+   ```
+
+   If `rustup` offers to install the MSVC prerequisites, install them so Rust has the linker and Windows SDK required to build the executable.
+   Reopen PowerShell after installation so the updated `PATH` is loaded.
+
+2. Install GitRex:
+
+   ```powershell
+   cargo install --git https://github.com/MarcosAlves90/gitrex --locked gitrex
+   ```
+
+3. Run it from any Git repository:
+
+   ```powershell
+   gitrex
+   ```
+
+If `gitrex` is not found after installation, make sure Cargo's binary directory is on `PATH`: `~/.cargo/bin` on macOS/Linux or `%USERPROFILE%\.cargo\bin` on Windows.
 
 ## Architecture
 
