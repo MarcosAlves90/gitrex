@@ -81,9 +81,6 @@ impl TuiController {
 
     pub fn tick(&mut self) {
         self.app.advance_loading_frame();
-        if matches!(self.app.view, View::Log) {
-            self.app.advance_graph_scroll();
-        }
     }
 
     pub fn start_operation(&mut self, action: PickerAction) -> anyhow::Result<()> {
@@ -123,6 +120,10 @@ enum Intent {
     ToggleBranchPanel,
     MoveSelection(isize),
     MoveCommitSelection(isize),
+    MoveCommitPage(isize),
+    SelectFirstCommit,
+    SelectLastCommit,
+    MoveGraphHorizontal(isize),
     MoveHelpScroll(isize),
     OpenBranchSearch,
     CloseBranchSearch,
@@ -242,6 +243,16 @@ impl TuiController {
             KeyCode::Char('k') | KeyCode::Up if matches!(self.app.view, View::Log) => {
                 Intent::MoveCommitSelection(-1)
             }
+            KeyCode::PageDown if matches!(self.app.view, View::Log) => Intent::MoveCommitPage(1),
+            KeyCode::PageUp if matches!(self.app.view, View::Log) => Intent::MoveCommitPage(-1),
+            KeyCode::Home | KeyCode::Char('g') if matches!(self.app.view, View::Log) => {
+                Intent::SelectFirstCommit
+            }
+            KeyCode::End | KeyCode::Char('G') if matches!(self.app.view, View::Log) => {
+                Intent::SelectLastCommit
+            }
+            KeyCode::Left if matches!(self.app.view, View::Log) => Intent::MoveGraphHorizontal(-4),
+            KeyCode::Right if matches!(self.app.view, View::Log) => Intent::MoveGraphHorizontal(4),
             KeyCode::Char('/') if matches!(self.app.view, View::Branches) => {
                 Intent::OpenBranchSearch
             }
@@ -289,6 +300,22 @@ impl TuiController {
             }
             Intent::MoveCommitSelection(delta) => {
                 self.app.move_commit_selection(delta);
+                Ok(false)
+            }
+            Intent::MoveCommitPage(direction) => {
+                self.app.move_commit_page(direction);
+                Ok(false)
+            }
+            Intent::SelectFirstCommit => {
+                self.app.select_first_commit();
+                Ok(false)
+            }
+            Intent::SelectLastCommit => {
+                self.app.select_last_commit();
+                Ok(false)
+            }
+            Intent::MoveGraphHorizontal(delta) => {
+                self.app.move_graph_horizontal(delta);
                 Ok(false)
             }
             Intent::MoveHelpScroll(delta) => {
@@ -744,6 +771,30 @@ mod tests {
             controller.intent_for_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Intent::OpenCommitActions
         ));
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
+            Intent::MoveCommitPage(1)
+        );
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
+            Intent::MoveCommitPage(-1)
+        );
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            Intent::SelectFirstCommit
+        );
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            Intent::SelectLastCommit
+        );
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            Intent::MoveGraphHorizontal(-4)
+        );
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            Intent::MoveGraphHorizontal(4)
+        );
     }
 
     #[test]
@@ -1212,6 +1263,16 @@ mod tests {
             .unwrap());
         assert!(!controller
             .apply_intent(Intent::MoveCommitSelection(-1))
+            .unwrap());
+        assert!(!controller.apply_intent(Intent::MoveCommitPage(1)).unwrap());
+        assert!(!controller.apply_intent(Intent::MoveCommitPage(-1)).unwrap());
+        assert!(!controller.apply_intent(Intent::SelectFirstCommit).unwrap());
+        assert!(!controller.apply_intent(Intent::SelectLastCommit).unwrap());
+        assert!(!controller
+            .apply_intent(Intent::MoveGraphHorizontal(4))
+            .unwrap());
+        assert!(!controller
+            .apply_intent(Intent::MoveGraphHorizontal(-4))
             .unwrap());
         assert!(!controller.apply_intent(Intent::OpenHelp).unwrap());
         assert!(!controller.apply_intent(Intent::MoveHelpScroll(1)).unwrap());

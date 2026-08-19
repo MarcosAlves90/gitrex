@@ -142,6 +142,7 @@ pub struct App {
     pub(crate) delete_branch_confirm_open: bool,
     pub(crate) delete_branch_target: Option<DeleteBranchTarget>,
     pub(crate) graph_scroll_offset: usize,
+    pub(crate) graph_page_size: usize,
     pub(crate) branch_filter: String,
     pub(crate) branch_search_open: bool,
     pub(crate) branch_search_input: String,
@@ -178,6 +179,7 @@ impl App {
             delete_branch_confirm_open: false,
             delete_branch_target: None,
             graph_scroll_offset: 0,
+            graph_page_size: 1,
             branch_filter: String::new(),
             branch_search_open: false,
             branch_search_input: String::new(),
@@ -201,14 +203,31 @@ impl App {
         self.message_kind = kind;
     }
 
+    fn set_navigation_hint(&mut self, message: &'static str) {
+        if matches!(self.message_kind, MessageKind::Info) {
+            self.set_feedback(message, MessageKind::Info);
+        }
+    }
+
     pub fn select_view(&mut self, view: View) {
         let was_help_open = self.help_is_open();
         self.view = view;
         if was_help_open {
             self.help_return_view = Some(view);
         }
-        if matches!(self.view, View::Branches) {
-            self.ensure_active_branch_selection_visible();
+        match self.view {
+            View::Branches => {
+                self.ensure_active_branch_selection_visible();
+                self.set_navigation_hint(
+                    "Branches: Tab switches local/remote, j/k moves, Enter opens actions.",
+                );
+            }
+            View::Log => {
+                self.set_navigation_hint(
+                    "Graph: j/k moves, PgUp/PgDn pages, Home/End jumps, arrows pan, Enter opens actions.",
+                );
+            }
+            View::Help => {}
         }
     }
 
@@ -442,6 +461,7 @@ impl App {
         let commit_count = self.log.len();
         if commit_count == 0 {
             self.selected_commit = 0;
+            self.graph_scroll_offset = 0;
             return;
         }
 
@@ -450,11 +470,51 @@ impl App {
         } else {
             self.selected_commit.saturating_add(delta as usize)
         };
+        let next = next.min(commit_count.saturating_sub(1));
 
         if next != self.selected_commit {
             self.graph_scroll_offset = 0;
         }
-        self.selected_commit = next.min(commit_count.saturating_sub(1));
+        self.selected_commit = next;
+    }
+
+    pub fn set_graph_page_size(&mut self, page_size: usize) {
+        self.graph_page_size = page_size.max(1);
+    }
+
+    pub fn move_commit_page(&mut self, direction: isize) {
+        if direction == 0 {
+            return;
+        }
+        let step = self.graph_page_size.min(isize::MAX as usize) as isize;
+        let delta = if direction.is_negative() { -step } else { step };
+        self.move_commit_selection(delta);
+    }
+
+    pub fn select_first_commit(&mut self) {
+        if !self.log.is_empty() {
+            self.selected_commit = 0;
+        }
+        self.graph_scroll_offset = 0;
+    }
+
+    pub fn select_last_commit(&mut self) {
+        self.selected_commit = self.log.len().saturating_sub(1);
+        self.graph_scroll_offset = 0;
+    }
+
+    pub fn move_graph_horizontal(&mut self, delta: isize) {
+        let max_offset = self
+            .selected_commit()
+            .map(|commit| commit.subject.chars().count().saturating_sub(1))
+            .unwrap_or(0);
+        let next = if delta.is_negative() {
+            self.graph_scroll_offset
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            self.graph_scroll_offset.saturating_add(delta as usize)
+        };
+        self.graph_scroll_offset = next.min(max_offset);
     }
 
     pub fn move_help_scroll(&mut self, delta: isize) {
@@ -463,14 +523,6 @@ impl App {
         } else {
             self.help_scroll_offset = self.help_scroll_offset.saturating_add(delta as usize);
         }
-    }
-
-    pub fn advance_graph_scroll(&mut self) {
-        if self.log.is_empty() {
-            self.graph_scroll_offset = 0;
-            return;
-        }
-        self.graph_scroll_offset = self.graph_scroll_offset.wrapping_add(1);
     }
 
     pub fn open_picker(&mut self) {
@@ -720,6 +772,7 @@ impl App {
         self.graph = snapshot.history.graph;
         self.selected_branch = snapshot.selected_branch;
         self.selected_commit = self.selected_commit.min(self.log.len().saturating_sub(1));
+        self.graph_scroll_offset = 0;
         let _ = self.ensure_selected_local_branch_visible();
         let _ = self.ensure_selected_remote_branch_visible();
     }
@@ -744,24 +797,17 @@ impl App {
             return;
         }
 
-        let [header, body, footer] = layout::dashboard(frame.area());
-        let [left, right] = layout::body(body);
-        let [status_area, branches_area] = layout::left_column(left);
-        let [search_area, remote_area, local_area] = layout::branch_sections(branches_area);
+        let [header, body, footer] = if matches!(self.view, View::Log) {
+            layout::graph_screen(frame.area())
+        } else {
+            layout::dashboard(frame.area())
+        };
 
         frame.render_widget(self.render_header(), header);
-        frame.render_widget(self.render_status(), status_area);
-        frame.render_widget(self.render_branch_search(), search_area);
-        let mut remote_state = self.remote_branch_state();
-        frame.render_stateful_widget(
-            self.render_remote_branches(),
-            remote_area,
-            &mut remote_state,
-        );
-        let mut branch_state = self.branch_state();
-        frame.render_stateful_widget(self.render_local_branches(), local_area, &mut branch_state);
-        let mut graph_state = self.graph_state();
-        frame.render_stateful_widget(self.render_graph(right.width), right, &mut graph_state);
+        match self.view {
+            View::Log => self.render_graph_workspace(frame, body),
+            View::Branches | View::Help => self.render_dashboard_body(frame, body),
+        }
         frame.render_widget(self.render_footer(), footer);
         if self.branch_create_open {
             let popup = self.render_branch_creator();
@@ -796,6 +842,48 @@ impl App {
         if self.help_is_open() {
             self.render_help(frame);
         }
+    }
+
+    fn render_dashboard_body(&mut self, frame: &mut Frame<'_>, body: Rect) {
+        let [left, right] = layout::body(body);
+        let [status_area, branches_area] = layout::left_column(left);
+        let [search_area, remote_area, local_area] = layout::branch_sections(branches_area);
+
+        frame.render_widget(self.render_status(), status_area);
+        frame.render_widget(self.render_branch_search(), search_area);
+        let mut remote_state = self.remote_branch_state();
+        frame.render_stateful_widget(
+            self.render_remote_branches(),
+            remote_area,
+            &mut remote_state,
+        );
+        let mut branch_state = self.branch_state();
+        frame.render_stateful_widget(self.render_local_branches(), local_area, &mut branch_state);
+        let mut graph_state = self.graph_state();
+        frame.render_stateful_widget(self.render_graph(right.width), right, &mut graph_state);
+    }
+
+    fn render_graph_workspace(&mut self, frame: &mut Frame<'_>, body: Rect) {
+        let [graph_area, details_area] = layout::graph_workspace(body);
+        let visible_rows = graph_area.height.saturating_sub(2) as usize;
+        let page_size = if self.graph.is_empty() {
+            1
+        } else {
+            visible_rows
+                .saturating_mul(self.log.len())
+                .checked_div(self.graph.len())
+                .unwrap_or(1)
+                .max(1)
+        };
+        self.set_graph_page_size(page_size);
+
+        let mut graph_state = self.graph_state();
+        frame.render_stateful_widget(
+            self.render_graph(graph_area.width),
+            graph_area,
+            &mut graph_state,
+        );
+        frame.render_widget(self.render_commit_details(), details_area);
     }
 
     fn render_loading_splash(&self, frame: &mut Frame<'_>) {
@@ -1120,9 +1208,15 @@ impl App {
         .into_iter()
         .map(ListItem::new)
         .collect::<Vec<_>>();
+        let position = if self.log.is_empty() {
+            0
+        } else {
+            self.selected_commit.saturating_add(1).min(self.log.len())
+        };
         let title = format!(
-            "[2] {}",
-            output::render_graph_title(self.selected_graph_label().as_deref())
+            "[2] {} • {position}/{}",
+            output::render_graph_title(self.selected_graph_label().as_deref()),
+            self.log.len()
         );
 
         List::new(items)
@@ -1135,6 +1229,59 @@ impl App {
             )
             .highlight_style(item_style)
             .highlight_symbol("▶ ")
+    }
+
+    fn render_commit_details(&self) -> Paragraph<'_> {
+        let label_style = Style::default()
+            .fg(theme::MUTED)
+            .add_modifier(Modifier::BOLD);
+        let value_style = Style::default().fg(theme::TEXT);
+        let lines = match self.selected_commit() {
+            Some(commit) => vec![
+                Line::from(Span::styled(
+                    commit.subject.clone(),
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Author  ", label_style),
+                    Span::styled(commit.author.clone(), value_style),
+                ]),
+                Line::from(vec![
+                    Span::styled("Date    ", label_style),
+                    Span::styled(commit.date.clone(), value_style),
+                ]),
+                Line::from(vec![
+                    Span::styled("Commit  ", label_style),
+                    Span::styled(commit.hash.clone(), Style::default().fg(theme::PURPLE)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Scope   ", label_style),
+                    Span::styled(
+                        self.selected_graph_label()
+                            .unwrap_or_else(|| "repository".to_string()),
+                        Style::default().fg(theme::TEAL),
+                    ),
+                ]),
+            ],
+            None => vec![Line::from(Span::styled(
+                "No commits available for the selected graph.",
+                Style::default().fg(theme::MUTED),
+            ))],
+        };
+
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(theme::panel_surface_style(true))
+            .block(
+                Block::default()
+                    .title("Selected Commit")
+                    .title_style(theme::panel_title_style(true, theme::TEAL))
+                    .borders(Borders::ALL)
+                    .border_style(theme::panel_border_style(true, theme::TEAL)),
+            )
     }
 
     fn graph_state(&self) -> ListState {
@@ -1475,10 +1622,26 @@ mod tests {
     #[test]
     fn feedback_kind_is_settable() {
         let mut app = App::new();
-        app.set_feedback("Saved", MessageKind::Success);
-        app.select_view(View::Log);
-        assert_eq!(app.view, View::Log);
-        assert_eq!(app.message, "Saved");
+
+        for kind in [
+            MessageKind::Success,
+            MessageKind::Warning,
+            MessageKind::Error,
+        ] {
+            app.set_feedback("Saved", kind);
+            app.select_view(View::Log);
+            assert_eq!(app.view, View::Log);
+            assert_eq!(app.message, "Saved");
+            assert_eq!(app.message_kind, kind);
+        }
+
+        app.set_feedback("Old hint", MessageKind::Info);
+        app.select_view(View::Branches);
+        assert_eq!(
+            app.message,
+            "Branches: Tab switches local/remote, j/k moves, Enter opens actions."
+        );
+        assert_eq!(app.message_kind, MessageKind::Info);
     }
 
     #[test]
@@ -1821,6 +1984,37 @@ mod tests {
     }
 
     #[test]
+    fn graph_navigation_supports_pages_edges_and_horizontal_pan() {
+        let mut app = App::new();
+        app.log = (0..20)
+            .map(|index| crate::domain::CommitSummary {
+                hash: format!("{index:040x}"),
+                author: "Marcos".to_string(),
+                date: "2026-08-19".to_string(),
+                subject: format!("commit subject {index} with extra context"),
+            })
+            .collect();
+
+        app.set_graph_page_size(6);
+        app.move_commit_page(1);
+        assert_eq!(app.selected_commit, 6);
+        app.move_commit_page(-1);
+        assert_eq!(app.selected_commit, 0);
+
+        app.select_last_commit();
+        assert_eq!(app.selected_commit, 19);
+        app.select_first_commit();
+        assert_eq!(app.selected_commit, 0);
+
+        app.move_graph_horizontal(5);
+        assert_eq!(app.graph_scroll_offset, 5);
+        app.move_graph_horizontal(-3);
+        assert_eq!(app.graph_scroll_offset, 2);
+        app.move_graph_horizontal(-99);
+        assert_eq!(app.graph_scroll_offset, 0);
+    }
+
+    #[test]
     fn commit_actions_are_ordered() {
         let app = App::new();
         assert_eq!(app.commit_actions()[0], CommitAction::CheckoutCommit);
@@ -2001,6 +2195,25 @@ mod tests {
     }
 
     #[test]
+    fn graph_workspace_uses_the_full_body_and_adapts_to_terminal_width() {
+        let mut app = populated_app();
+        app.select_view(View::Log);
+
+        let wide = render_text(&mut app, 120, 40);
+        assert!(wide.contains("Selected Commit"));
+        assert!(wide.contains("Author"));
+        assert!(wide.contains("Marcos"));
+        assert!(!wide.contains("[1] Local branches"));
+        assert!(!wide.contains("[1] Remote branches"));
+        assert!(app.graph_page_size > 1);
+
+        let narrow = render_text(&mut app, 80, 24);
+        assert!(narrow.contains("[2] Git Graph"));
+        assert!(narrow.contains("Selected Commit"));
+        assert!(!narrow.contains("[1] Local branches"));
+    }
+
+    #[test]
     fn render_exercises_dashboard_views_overlays_help_and_loading() {
         let mut app = populated_app();
 
@@ -2013,8 +2226,11 @@ mod tests {
         assert!(dashboard.contains("main"));
 
         app.select_view(View::Log);
-        app.advance_graph_scroll();
-        assert!(render_text(&mut app, 120, 40).contains("[2] Git Graph"));
+        let graph_screen = render_text(&mut app, 120, 40);
+        assert!(graph_screen.contains("[2] Git Graph"));
+        assert!(graph_screen.contains("Selected Commit"));
+        assert!(!graph_screen.contains("[1] Local branches"));
+        assert!(!graph_screen.contains("[1] Remote branches"));
 
         app.select_view(View::Branches);
         app.set_branch_panel(BranchPanel::Local);
@@ -2122,7 +2338,7 @@ mod tests {
         app.move_selection(-1);
         assert!(app.selected_remote_branch.is_none());
         app.move_commit_selection(1);
-        app.advance_graph_scroll();
+        app.move_graph_horizontal(8);
         assert_eq!(app.selected_commit, 0);
         assert_eq!(app.graph_scroll_offset, 0);
 

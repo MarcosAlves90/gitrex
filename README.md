@@ -239,12 +239,20 @@ flowchart LR
 - In the local branch panel, branch actions also include deleting the selected local branch after confirmation
 - In the remote branch panel, branch actions include creating a local branch, checking out detached HEAD, or deleting the selected remote branch after confirmation
 
-### Graph view
+### Graph workspace
 
-- `j/k` or arrow keys move between commits
+Press `2` to open a dedicated graph workspace. The branch/status panels are replaced by the graph and a selected-commit inspector so the available terminal area is used for
+history analysis.
+
+- `j/k` or `↑/↓` move one commit at a time
+- `PageUp/PageDown` move by the currently visible graph page
+- `Home/End` or `g/G` jump to the first or last commit
+- `←/→` pan a long selected commit subject manually; the graph never auto-scrolls text
 - `Enter` opens commit actions for the selected commit
-- The graph follows the selected branch in the Branches view
-- The selected commit subject scrolls when it does not fit
+- The selected-commit panel shows the full subject, author, date, full hash, and graph scope
+- The graph follows the branch or remote ref selected in the Branches view
+- Wide terminals place commit details beside the graph; narrower terminals stack details below it
+- Date/hash columns disappear progressively on narrow terminals to preserve the graph lanes and commit subject
 
 ### Help screen
 

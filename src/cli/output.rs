@@ -135,7 +135,7 @@ pub fn render_graph_rows(
     let mut commit_index = 0usize;
     rows.iter()
         .map(|row| match row {
-            GraphLine::Connector { graph } => render_graph_connector(graph),
+            GraphLine::Connector { graph } => render_graph_connector(graph, active),
             GraphLine::Commit { graph, summary } => {
                 let line = render_graph_line(
                     graph,
@@ -152,15 +152,14 @@ pub fn render_graph_rows(
         .collect()
 }
 
-fn scroll_text(text: &str, offset: usize, width: usize) -> String {
+fn viewport_text(text: &str, offset: usize, width: usize) -> String {
     if text.is_empty() || width == 0 {
         return String::new();
     }
 
-    let marquee = format!("{text}   |   {text}   |   ");
-    let chars = marquee.chars().collect::<Vec<_>>();
-    let start = offset % chars.len().max(1);
-    chars.iter().cycle().skip(start).take(width).collect()
+    let chars = text.chars().collect::<Vec<_>>();
+    let start = offset.min(chars.len().saturating_sub(1));
+    chars.iter().skip(start).take(width).collect()
 }
 
 fn clip_text(text: &str, width: usize) -> String {
@@ -176,16 +175,18 @@ fn pad_text(text: &str, width: usize) -> String {
     out
 }
 
-fn render_graph_connector(graph: &str) -> Line<'static> {
+fn render_graph_connector(graph: &str, active: bool) -> Line<'static> {
+    let graph_color = if active {
+        ratatui::style::Color::Rgb(0, 200, 255)
+    } else {
+        ratatui::style::Color::Rgb(139, 148, 158)
+    };
     Line::from(vec![
         Span::styled(
             "  ",
             Style::default().fg(ratatui::style::Color::Rgb(33, 38, 45)),
         ),
-        Span::styled(
-            graph.to_string(),
-            Style::default().fg(ratatui::style::Color::Rgb(139, 148, 158)),
-        ),
+        Span::styled(graph.to_string(), Style::default().fg(graph_color)),
     ])
 }
 
@@ -214,37 +215,45 @@ fn render_graph_line(
     } else {
         ratatui::style::Color::Rgb(139, 148, 158)
     });
+    let graph_style = Style::default().fg(if !active {
+        ratatui::style::Color::Rgb(139, 148, 158)
+    } else if selected {
+        ratatui::style::Color::Rgb(186, 85, 255)
+    } else {
+        ratatui::style::Color::Rgb(0, 200, 255)
+    });
     let separator_style = Style::default().fg(ratatui::style::Color::Rgb(33, 38, 45));
 
     let short_hash = entry.hash.chars().take(8).collect::<String>();
     let graph_width = graph.chars().count();
     let date_text = entry.date.chars().take(10).collect::<String>();
-    let name_fixed_width = content_width
-        .saturating_sub(graph_width)
-        .saturating_sub(date_text.chars().count())
-        .saturating_sub(short_hash.chars().count())
-        .saturating_sub(14)
-        .max(18);
-    let subject_width = name_fixed_width;
-    let subject_raw = if subject_width == 0 {
-        String::new()
-    } else if selected && entry.subject.chars().count() > subject_width {
-        scroll_text(&entry.subject, offset, subject_width)
+    let prefix_width = graph_width.saturating_add(3);
+    let show_hash = content_width >= prefix_width.saturating_add(24);
+    let show_date = content_width >= prefix_width.saturating_add(38);
+    let metadata_width = (if show_date { 12 } else { 0 }) + (if show_hash { 10 } else { 0 });
+    let subject_width = content_width.saturating_sub(prefix_width.saturating_add(metadata_width));
+    let subject_raw = if selected {
+        viewport_text(&entry.subject, offset, subject_width)
     } else {
         clip_text(&entry.subject, subject_width)
     };
-    let subject = pad_text(&subject_raw, name_fixed_width);
+    let subject = pad_text(&subject_raw, subject_width);
 
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled("  ", separator_style),
-        Span::styled(graph.to_string(), separator_style),
+        Span::styled(graph.to_string(), graph_style),
         Span::styled(" ", separator_style),
         Span::styled(subject, subject_style),
-        Span::styled("  ", separator_style),
-        Span::styled(date_text, date_style),
-        Span::styled("  ", separator_style),
-        Span::styled(short_hash, hash_style),
-    ])
+    ];
+    if show_date {
+        spans.push(Span::styled("  ", separator_style));
+        spans.push(Span::styled(date_text, date_style));
+    }
+    if show_hash {
+        spans.push(Span::styled("  ", separator_style));
+        spans.push(Span::styled(short_hash, hash_style));
+    }
+    Line::from(spans)
 }
 
 pub fn render_graph_title(branch_name: Option<&str>) -> String {
@@ -265,7 +274,7 @@ pub fn render_status_entries(entries: &[StatusEntry]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_graph_rows, render_graph_title, scroll_text};
+    use super::{render_graph_rows, render_graph_title, viewport_text};
     use crate::domain::{CommitSummary, GraphLine};
     use ratatui::style::Color;
 
@@ -413,6 +422,22 @@ mod tests {
     }
 
     #[test]
+    fn graph_active_selected_lane_is_visually_distinct() {
+        let graph = vec![GraphLine::Commit {
+            graph: "*".to_string(),
+            summary: CommitSummary {
+                hash: "abc123def456".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Selected commit".to_string(),
+            },
+        }];
+
+        let lines = render_graph_rows(&graph, 0, 0, 80, true);
+        assert_eq!(lines[0].spans[1].style.fg, Some(Color::Rgb(186, 85, 255)));
+    }
+
+    #[test]
     fn graph_inactive_panels_use_muted_text_colors() {
         let graph = vec![GraphLine::Commit {
             graph: "*".to_string(),
@@ -442,11 +467,33 @@ mod tests {
     }
 
     #[test]
-    fn graph_scroll_keeps_separator_between_loops() {
+    fn graph_horizontal_viewport_is_stable_and_non_cyclic() {
         let text = "first word last word";
-        let scrolled = scroll_text(text, 0, 32);
+        assert_eq!(viewport_text(text, 0, 10), "first word");
+        assert_eq!(viewport_text(text, 6, 9), "word last");
+        assert!(!viewport_text(text, 6, 20).contains("|"));
+    }
 
-        assert!(scrolled.contains("   |   "));
-        assert!(scrolled.starts_with(text));
+    #[test]
+    fn graph_rows_hide_metadata_when_terminal_is_narrow() {
+        let graph = vec![GraphLine::Commit {
+            graph: "*".to_string(),
+            summary: CommitSummary {
+                hash: "abc123def456".to_string(),
+                author: "Marcos".to_string(),
+                date: "2026-05-24".to_string(),
+                subject: "Responsive graph row".to_string(),
+            },
+        }];
+
+        let line = render_graph_rows(&graph, 0, 0, 24, true);
+        let text = line[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("Responsive"));
+        assert!(!text.contains("2026-05-24"));
+        assert!(!text.contains("abc123de"));
     }
 }

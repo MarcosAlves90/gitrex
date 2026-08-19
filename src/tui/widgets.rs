@@ -170,18 +170,28 @@ pub fn help_lines(
         ),
         example("press Enter on origin/main to create a local branch from the remote ref."),
         Line::from(""),
-        section("Git Graph panel"),
+        section("Git Graph workspace"),
         bullet(
             "j/k",
             theme::ACCENT,
-            "or arrows move commits; Enter opens commit actions",
+            "or up/down move one commit; PgUp/PgDn move one visible page",
+        ),
+        bullet(
+            "Home/End",
+            theme::PURPLE,
+            "or g/G jump to the first or last commit",
+        ),
+        bullet(
+            "left/right",
+            theme::TEAL,
+            "pan long selected commit subjects without automatic scrolling",
         ),
         bullet(
             "Enter",
             theme::SUCCESS,
             "checkout commit or create branch from commit",
         ),
-        example("press Enter on a commit to inspect it or branch from it."),
+        example("press 2 for the full graph workspace; details follow the selected commit."),
         Line::from(""),
         section("Cleanup modal"),
         bullet(
@@ -253,7 +263,9 @@ mod tests {
         assert!(copy.contains("switch Branches/Graph"));
         assert!(copy.contains("informational only"));
         assert!(copy.contains("Branches panel"));
-        assert!(copy.contains("Git Graph panel"));
+        assert!(copy.contains("Git Graph workspace"));
+        assert!(copy.contains("PgUp/PgDn"));
+        assert!(copy.contains("left/right"));
         assert!(copy.contains("origin/feature/login"));
         assert!(copy.contains("example:"));
         assert!(!copy.contains("Close help with h or Esc."));
