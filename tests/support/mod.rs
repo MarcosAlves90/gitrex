@@ -323,6 +323,8 @@ where
     let mut command = Command::new("git");
     if let Some(repository) = repository {
         command.arg("-C").arg(repository);
+    } else {
+        command.current_dir(env::temp_dir());
     }
     command
         .args(args)
