@@ -35,7 +35,6 @@ pub fn loading_splash_text(frame: usize) -> String {
 
 pub fn mode_label(view: View) -> &'static str {
     match view {
-        View::Status => "status",
         View::Branches => "branches",
         View::Log => "graph",
         View::Help => "help",
@@ -105,9 +104,7 @@ pub fn help_lines(
             keycap("1", theme::TEAL),
             Span::raw("/"),
             keycap("2", theme::TEAL),
-            Span::raw("/"),
-            keycap("3", theme::TEAL),
-            Span::raw(" switch Status/Branches/Graph"),
+            Span::raw(" switch Branches/Graph"),
         ]),
         Line::from(vec![
             Span::raw("Current branch: "),
@@ -134,7 +131,7 @@ pub fn help_lines(
         bullet(
             "info",
             theme::STATUS,
-            "branch, upstream, divergence, and working tree changes",
+            "informational only: branch, upstream, divergence, and working tree changes",
         ),
         example("main is ahead of origin/main, with 3 files changed."),
         Line::from(""),
@@ -239,7 +236,6 @@ mod tests {
 
     #[test]
     fn mode_label_matches_view_names() {
-        assert_eq!(mode_label(View::Status), "status");
         assert_eq!(mode_label(View::Branches), "branches");
         assert_eq!(mode_label(View::Log), "graph");
         assert_eq!(mode_label(View::Help), "help");
@@ -254,6 +250,8 @@ mod tests {
         ));
         assert!(copy.contains("feature/login"));
         assert!(copy.contains("toggles help"));
+        assert!(copy.contains("switch Branches/Graph"));
+        assert!(copy.contains("informational only"));
         assert!(copy.contains("Branches panel"));
         assert!(copy.contains("Git Graph panel"));
         assert!(copy.contains("origin/feature/login"));

@@ -202,11 +202,12 @@ sequenceDiagram
 
 ## TUI
 
-The TUI is built around three top-level views:
+The TUI keeps repository status visible as an informational panel and provides two navigable views:
 
-- `Status`
-- `Branches`
-- `Graph`
+- `[1] Branches`
+- `[2] Graph`
+
+`Status` remains visible but does not receive keyboard focus because it has no panel-specific actions.
 
 ```mermaid
 flowchart LR
@@ -223,7 +224,7 @@ flowchart LR
 
 ### Navigation
 
-- `1/2/3` switch between status, branches, and graph
+- `1` focuses branches and `2` focuses the graph; the same numbers are shown in their panel titles
 - `j/k` or arrow keys move within the active panel
 - `h` opens the help screen
 - `Esc` or `h` closes the help screen

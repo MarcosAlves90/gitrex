@@ -18,7 +18,6 @@ use super::{branching, layout, theme, widgets};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    Status,
     Branches,
     Log,
     Help,
@@ -922,7 +921,7 @@ impl App {
     }
 
     fn render_status(&self) -> Paragraph<'_> {
-        let active = matches!(self.view, View::Status);
+        let active = false;
         let accent = theme::STATUS;
         let text = self
             .status
@@ -1019,7 +1018,7 @@ impl App {
             .block(
                 Block::default()
                     .title(format!(
-                        "Remote branches ({}/{})",
+                        "[1] Remote branches ({}/{})",
                         selected.saturating_add(1),
                         total.max(1)
                     ))
@@ -1096,7 +1095,7 @@ impl App {
             .block(
                 Block::default()
                     .title(format!(
-                        "Local branches ({}/{})",
+                        "[1] Local branches ({}/{})",
                         selected.saturating_add(1),
                         total.max(1)
                     ))
@@ -1121,7 +1120,10 @@ impl App {
         .into_iter()
         .map(ListItem::new)
         .collect::<Vec<_>>();
-        let title = output::render_graph_title(self.selected_graph_label().as_deref());
+        let title = format!(
+            "[2] {}",
+            output::render_graph_title(self.selected_graph_label().as_deref())
+        );
 
         List::new(items)
             .block(
@@ -1497,9 +1499,9 @@ mod tests {
         assert_eq!(app.view, View::Log);
 
         app.open_help();
-        app.select_view(View::Status);
+        app.select_view(View::Branches);
         app.close_help();
-        assert_eq!(app.view, View::Status);
+        assert_eq!(app.view, View::Branches);
     }
 
     #[test]
@@ -2004,16 +2006,15 @@ mod tests {
 
         app.select_view(View::Branches);
         let dashboard = render_text(&mut app, 120, 40);
-        assert!(dashboard.contains("Remote branches"));
-        assert!(dashboard.contains("Local branches"));
-        assert!(dashboard.contains("Git Graph"));
+        assert!(dashboard.contains("Status"));
+        assert!(dashboard.contains("[1] Remote branches"));
+        assert!(dashboard.contains("[1] Local branches"));
+        assert!(dashboard.contains("[2] Git Graph"));
         assert!(dashboard.contains("main"));
 
-        app.select_view(View::Status);
-        assert!(render_text(&mut app, 120, 40).contains("Status"));
         app.select_view(View::Log);
         app.advance_graph_scroll();
-        assert!(render_text(&mut app, 120, 40).contains("Git Graph"));
+        assert!(render_text(&mut app, 120, 40).contains("[2] Git Graph"));
 
         app.select_view(View::Branches);
         app.set_branch_panel(BranchPanel::Local);

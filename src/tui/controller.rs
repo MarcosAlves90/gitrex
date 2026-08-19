@@ -224,9 +224,8 @@ impl TuiController {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Intent::Quit,
             KeyCode::Char('r') => Intent::Refresh,
-            KeyCode::Char('1') => Intent::SelectView(View::Status),
-            KeyCode::Char('2') => Intent::SelectView(View::Branches),
-            KeyCode::Char('3') => Intent::SelectView(View::Log),
+            KeyCode::Char('1') => Intent::SelectView(View::Branches),
+            KeyCode::Char('2') => Intent::SelectView(View::Log),
             KeyCode::Char('j') | KeyCode::Down if matches!(self.app.view, View::Branches) => {
                 Intent::MoveSelection(1)
             }
@@ -1079,9 +1078,8 @@ mod tests {
             (KeyCode::Char('q'), Intent::Quit),
             (KeyCode::Esc, Intent::Quit),
             (KeyCode::Char('r'), Intent::Refresh),
-            (KeyCode::Char('1'), Intent::SelectView(View::Status)),
-            (KeyCode::Char('2'), Intent::SelectView(View::Branches)),
-            (KeyCode::Char('3'), Intent::SelectView(View::Log)),
+            (KeyCode::Char('1'), Intent::SelectView(View::Branches)),
+            (KeyCode::Char('2'), Intent::SelectView(View::Log)),
             (KeyCode::Char('h'), Intent::OpenHelp),
         ] {
             assert_eq!(
@@ -1089,6 +1087,11 @@ mod tests {
                 expected
             );
         }
+
+        assert_eq!(
+            controller.intent_for_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)),
+            Intent::None
+        );
 
         controller.app_mut().open_help();
         assert_eq!(
