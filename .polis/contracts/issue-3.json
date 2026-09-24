@@ -45,9 +45,9 @@
         "id": "REQ-003",
         "statement": "Support repeatable exact branch-name exclusions."
       },
-      {
-        "id": "REQ-004",
-        "statement": "Support optional filtering by configured upstream remote names without fetching."
+        {
+          "id": "REQ-004",
+          "statement": "Support repeatable filtering by configured upstream remote names; include branches whose resolved upstream remote is in the selected set, without fetching."
       },
       {
         "id": "REQ-005",
@@ -57,13 +57,13 @@
         "id": "REQ-006",
         "statement": "Revalidate eligibility per selected branch and delete only with safe git branch -d semantics."
       },
-      {
-        "id": "REQ-007",
-        "statement": "Provide a TUI cleanup modal with individual/mass selection, a warning, explicit confirmation, and cancellation."
+        {
+          "id": "REQ-007",
+          "statement": "Provide a TUI cleanup modal with individual/mass selection, a warning, explicit confirmation, and cancellation; keep the selected candidate visible and allow navigation through long or wrapped review content in a bounded viewport."
       },
-      {
-        "id": "REQ-008",
-        "statement": "Report per-branch outcomes and refresh TUI state after batch attempts, including partial failures."
+        {
+          "id": "REQ-008",
+          "statement": "Report per-branch outcomes with navigation through long reports and refresh TUI state after batch attempts, including partial failures."
       },
       {
         "id": "REQ-009",
@@ -84,9 +84,9 @@
         ],
         "proof": "regression"
       },
-      {
-        "id": "AC-002",
-        "statement": "Exact exclusions and upstream-remote filters change the candidate set as specified without network activity.",
+        {
+          "id": "AC-002",
+          "statement": "Exact exclusions and repeatable upstream-remote filters change the candidate set as specified; branches from any selected remote are included and other remotes are excluded without network activity.",
         "requirements": [
           "REQ-003",
           "REQ-004",
@@ -110,29 +110,38 @@
         ],
         "proof": "regression"
       },
-      {
-        "id": "AC-005",
-        "statement": "TUI users can open cleanup, select candidates, select all/none, review a warning, confirm, or cancel.",
+        {
+          "id": "AC-005",
+          "statement": "TUI users can open cleanup, select candidates, select all/none, keep the selected candidate visible, review a warning, confirm, or cancel.",
         "requirements": [
           "REQ-007"
         ],
         "proof": "regression"
       },
-      {
-        "id": "AC-006",
-        "statement": "TUI cleanup reports partial outcomes and refreshes repository state after the attempt.",
+        {
+          "id": "AC-006",
+          "statement": "TUI cleanup reports partial outcomes, allows access to every report detail, and refreshes repository state after the attempt.",
         "requirements": [
           "REQ-008"
         ],
         "proof": "regression"
       },
-      {
-        "id": "AC-007",
+        {
+          "id": "AC-007",
         "statement": "README examples and safety/ancestry limitations match implemented CLI and TUI behavior.",
         "requirements": [
           "REQ-010"
         ],
-        "proof": "regression"
+          "proof": "regression"
+        },
+        {
+          "id": "AC-008",
+          "statement": "Candidates, confirmation branches, and report details remain accessible by scrolling when their content exceeds a small viewport or wraps across lines.",
+          "requirements": [
+            "REQ-007",
+            "REQ-008"
+          ],
+          "proof": "regression"
       }
     ],
     "invariants": [
@@ -164,9 +173,9 @@
       }
     ],
     "inputs": [
-      {
-        "id": "IN-001",
-        "statement": "Optional base ref, exact excluded branch names, upstream remote names, selected candidate names, and CLI confirmation flag."
+        {
+          "id": "IN-001",
+          "statement": "Optional base ref, exact excluded branch names, zero or more upstream remote names, selected candidate names, and CLI confirmation flag."
       },
       {
         "id": "IN-002",
@@ -251,13 +260,13 @@
   "regression": {
     "mode": "red_green",
     "command": {
-      "argv": [
-        "cargo",
-        "test",
-        "--test",
-        "branch_cleanup",
-        "--locked"
-      ],
+          "argv": [
+            "cargo",
+            "test",
+            "--all",
+            "--locked",
+            "cleanup_"
+          ],
       "cwd": ".",
       "timeout_seconds": 1200,
       "environment": {
@@ -277,8 +286,9 @@
       }
     },
     "baseline_exit_code": 101,
-    "baseline_output_contains": [
-      "cleanup_preview_lists_merged_candidates"
+          "baseline_output_contains": [
+            "cleanup_accepts_multiple_selected_remotes",
+            "cleanup_candidate_viewport_follows_selection"
     ]
   }
 }
