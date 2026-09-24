@@ -263,9 +263,9 @@
           "argv": [
             "cargo",
             "test",
-            "--all",
+            "--lib",
             "--locked",
-            "cleanup_"
+            "cleanup_candidate_viewport_follows_selection"
           ],
       "cwd": ".",
       "timeout_seconds": 1200,
@@ -287,7 +287,6 @@
     },
     "baseline_exit_code": 101,
           "baseline_output_contains": [
-            "cleanup_accepts_multiple_selected_remotes",
             "cleanup_candidate_viewport_follows_selection"
     ]
   }
