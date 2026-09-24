@@ -1,0 +1,293 @@
+{
+  "schema_version": 3,
+  "kind": "feature",
+  "scope": {
+    "allowed_paths": [
+      ".polis/contracts/issue-3.json",
+      ".polis/policy.json",
+      "README.md",
+      "src/cli/args.rs",
+      "src/cli/mod.rs",
+      "src/cli/output.rs",
+      "src/domain/branch.rs",
+      "src/git/branch.rs",
+      "src/git/command.rs",
+      "src/git/shared.rs",
+      "src/tui/app.rs",
+      "src/tui/cleanup_tests.rs",
+      "src/tui/controller.rs",
+      "src/tui/mod.rs",
+      "src/tui/operations.rs",
+      "src/tui/widgets.rs",
+      "tests/branch_cleanup.rs"
+    ]
+  },
+  "test_scope": {
+    "allowed_paths": [
+      "src/tui/cleanup_tests.rs",
+      "src/tui/mod.rs",
+      "tests/branch_cleanup.rs"
+    ]
+  },
+  "development_method": "strict_sdd_tdd_v1",
+  "specification": {
+    "objective": "Add safe, reviewable cleanup for local branches merged by commit reachability into a selected base, with CLI and TUI workflows.",
+    "requirements": [
+      {
+        "id": "REQ-001",
+        "statement": "Resolve the cleanup base to a commit OID and identify only local branch tips reachable from that commit; default to current HEAD."
+      },
+      {
+        "id": "REQ-002",
+        "statement": "Protect the current branch and selected base branch from cleanup."
+      },
+      {
+        "id": "REQ-003",
+        "statement": "Support repeatable exact branch-name exclusions."
+      },
+        {
+          "id": "REQ-004",
+          "statement": "Support repeatable filtering by configured upstream remote names; include branches whose resolved upstream remote is in the selected set, without fetching."
+      },
+      {
+        "id": "REQ-005",
+        "statement": "Provide a preview-first cleanup CLI and require explicit --yes before batch deletion."
+      },
+      {
+        "id": "REQ-006",
+        "statement": "Revalidate eligibility per selected branch and delete only with safe git branch -d semantics."
+      },
+        {
+          "id": "REQ-007",
+          "statement": "Provide a TUI cleanup modal with individual/mass selection, a warning, explicit confirmation, and cancellation; keep the selected candidate visible and allow navigation through long or wrapped review content in a bounded viewport."
+      },
+        {
+          "id": "REQ-008",
+          "statement": "Report per-branch outcomes with navigation through long reports and refresh TUI state after batch attempts, including partial failures."
+      },
+      {
+        "id": "REQ-009",
+        "statement": "Never fetch, prune, push, or delete remote branches as an implicit cleanup effect."
+      },
+      {
+        "id": "REQ-010",
+        "statement": "Document CLI/TUI behavior, customization, safety semantics, examples, and ancestry limitations."
+      }
+    ],
+    "acceptance_criteria": [
+      {
+        "id": "AC-001",
+        "statement": "Candidates are local branches reachable from the resolved base; current/base and unmerged branches are excluded.",
+        "requirements": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "proof": "regression"
+      },
+        {
+          "id": "AC-002",
+          "statement": "Exact exclusions and repeatable upstream-remote filters change the candidate set as specified; branches from any selected remote are included and other remotes are excluded without network activity.",
+        "requirements": [
+          "REQ-003",
+          "REQ-004",
+          "REQ-009"
+        ],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-003",
+        "statement": "CLI invocation reviews candidates by default and deletes only after --yes.",
+        "requirements": [
+          "REQ-005"
+        ],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-004",
+        "statement": "Batch deletion revalidates eligibility and preserves Git's safe refusal for unmerged work.",
+        "requirements": [
+          "REQ-006"
+        ],
+        "proof": "regression"
+      },
+        {
+          "id": "AC-005",
+          "statement": "TUI users can open cleanup, select candidates, select all/none, keep the selected candidate visible, review a warning, confirm, or cancel.",
+        "requirements": [
+          "REQ-007"
+        ],
+        "proof": "regression"
+      },
+        {
+          "id": "AC-006",
+          "statement": "TUI cleanup reports partial outcomes, allows access to every report detail, and refreshes repository state after the attempt.",
+        "requirements": [
+          "REQ-008"
+        ],
+        "proof": "regression"
+      },
+        {
+          "id": "AC-007",
+        "statement": "README examples and safety/ancestry limitations match implemented CLI and TUI behavior.",
+        "requirements": [
+          "REQ-010"
+        ],
+          "proof": "regression"
+        },
+        {
+          "id": "AC-008",
+          "statement": "Candidates, confirmation branches, and report details remain accessible by scrolling when their content exceeds a small viewport or wraps across lines.",
+          "requirements": [
+            "REQ-007",
+            "REQ-008"
+          ],
+          "proof": "regression"
+      }
+    ],
+    "invariants": [
+      {
+        "id": "INV-001",
+        "statement": "Repository branch names are passed as argv data and are never interpolated into a shell command."
+      },
+      {
+        "id": "INV-002",
+        "statement": "Cleanup mutates local refs only and never uses force deletion."
+      },
+      {
+        "id": "INV-003",
+        "statement": "CLI and TUI use the same candidate and revalidation rules."
+      }
+    ],
+    "forbidden_states": [
+      {
+        "id": "FORBID-001",
+        "statement": "The checked-out branch or selected base branch is deleted by cleanup."
+      },
+      {
+        "id": "FORBID-002",
+        "statement": "An unmerged branch is force-deleted or removed because of a stale candidate list."
+      },
+      {
+        "id": "FORBID-003",
+        "statement": "Cleanup performs implicit fetch, prune, push, or remote-ref deletion."
+      }
+    ],
+    "inputs": [
+        {
+          "id": "IN-001",
+          "statement": "Optional base ref, exact excluded branch names, zero or more upstream remote names, selected candidate names, and CLI confirmation flag."
+      },
+      {
+        "id": "IN-002",
+        "statement": "Local Git refs and configured upstream metadata from the current repository snapshot."
+      }
+    ],
+    "outputs": [
+      {
+        "id": "OUT-001",
+        "statement": "Resolved base, ordered candidate list, preview/deletion feedback, and per-branch deleted/skipped/failed outcomes."
+      },
+      {
+        "id": "OUT-002",
+        "statement": "Refreshed TUI repository snapshot after a batch cleanup attempt."
+      }
+    ],
+    "failure_semantics": [
+      {
+        "id": "FAIL-001",
+        "statement": "An invalid repository or base returns an error before mutation."
+      },
+      {
+        "id": "FAIL-002",
+        "statement": "A branch no longer eligible at deletion time is skipped or fails safely; other selected branches may succeed and every outcome is reported."
+      },
+      {
+        "id": "FAIL-003",
+        "statement": "No-candidate preview reports zero candidates and performs no mutation."
+      }
+    ]
+  },
+  "behavior": {
+    "argv": [
+      "cargo",
+      "test",
+      "--all",
+      "--locked"
+    ],
+    "cwd": ".",
+    "timeout_seconds": 1200,
+    "environment": {
+      "mode": "clean",
+      "pass": [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SystemRoot",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "LOCALAPPDATA"
+      ]
+    }
+  },
+  "affected": {
+    "argv": [
+      "cargo",
+      "test",
+      "--all",
+      "--locked"
+    ],
+    "cwd": ".",
+    "timeout_seconds": 1200,
+    "environment": {
+      "mode": "clean",
+      "pass": [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SystemRoot",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "LOCALAPPDATA"
+      ]
+    }
+  },
+  "regression": {
+    "mode": "red_green",
+    "command": {
+          "argv": [
+            "cargo",
+            "test",
+            "--lib",
+            "--locked",
+            "cleanup_long_wrapped_candidate_viewport_follows_selection"
+          ],
+      "cwd": ".",
+      "timeout_seconds": 1200,
+      "environment": {
+        "mode": "clean",
+        "pass": [
+          "PATH",
+          "HOME",
+          "TMPDIR",
+          "TMP",
+          "TEMP",
+          "SystemRoot",
+          "COMSPEC",
+          "PATHEXT",
+          "USERPROFILE",
+          "LOCALAPPDATA"
+        ]
+      }
+    },
+    "baseline_exit_code": 101,
+          "baseline_output_contains": [
+            "cleanup_long_wrapped_candidate_viewport_follows_selection"
+    ]
+  }
+}

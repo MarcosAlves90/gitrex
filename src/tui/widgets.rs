@@ -107,6 +107,10 @@ pub fn help_lines(
             Span::raw(" switch Branches/Graph"),
         ]),
         Line::from(vec![
+            keycap("c", theme::ACCENT),
+            Span::raw(" opens review for merged local branch cleanup"),
+        ]),
+        Line::from(vec![
             Span::raw("Current branch: "),
             Span::styled(
                 branch.to_string(),
@@ -197,14 +201,19 @@ pub fn help_lines(
         bullet(
             "space",
             theme::SUCCESS,
-            "toggle a merged branch; a selects all; n clears; Enter confirms",
+            "toggle a merged branch; a selects all; n clears; Enter reviews",
         ),
         bullet(
             "Enter",
             theme::SUCCESS,
-            "deletion is confirmed in a warning dialog",
+            "opens a warning dialog; press Enter again to confirm",
         ),
-        example("select merged branches with space, then Enter to delete them."),
+        bullet(
+            "Esc",
+            theme::WARNING,
+            "cancels selection or returns from the warning dialog",
+        ),
+        example("press c, select merged branches with Space, then review and confirm."),
     ]
 }
 

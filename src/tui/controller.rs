@@ -8,7 +8,9 @@ use super::{
         RemoteBranchAction, View,
     },
     operation_flow,
-    operations::{GitOperationRunner, OperationOutcome, OperationRequest},
+    operations::{
+        parse_cleanup_report, CleanupReport, GitOperationRunner, OperationOutcome, OperationRequest,
+    },
 };
 
 pub struct TuiController {
@@ -54,7 +56,32 @@ impl TuiController {
         match rx.try_recv() {
             Ok(outcome) => {
                 self.operation_rx = None;
-                operation_flow::finish_operation(&mut self.app, outcome)
+                match outcome {
+                    OperationOutcome::Success { snapshot, message } => {
+                        if let Some(report) = parse_cleanup_report(&message) {
+                            self.app.apply_snapshot(snapshot);
+                            self.finish_cleanup(report, None);
+                            Ok(())
+                        } else {
+                            operation_flow::finish_operation(
+                                &mut self.app,
+                                OperationOutcome::Success { snapshot, message },
+                            )
+                        }
+                    }
+                    OperationOutcome::SuccessWithRefreshWarning { message, warning } => {
+                        if let Some(report) = parse_cleanup_report(&message) {
+                            self.finish_cleanup(report, Some(warning));
+                            Ok(())
+                        } else {
+                            operation_flow::finish_operation(
+                                &mut self.app,
+                                OperationOutcome::SuccessWithRefreshWarning { message, warning },
+                            )
+                        }
+                    }
+                    outcome => operation_flow::finish_operation(&mut self.app, outcome),
+                }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => Ok(()),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -150,6 +177,17 @@ enum Intent {
     DeleteBranchName,
     TypeBranchName(char),
     ConfirmBranchCreate,
+    OpenCleanup,
+    CloseCleanup,
+    MoveCleanupSelection(isize),
+    MoveCleanupScroll(isize),
+    MoveCleanupScrollPage(isize),
+    ToggleCleanupSelection,
+    SelectAllCleanup,
+    ClearCleanupSelection,
+    ReviewCleanup,
+    BackCleanupConfirmation,
+    ConfirmCleanup,
 }
 
 impl TuiController {
@@ -168,6 +206,42 @@ impl TuiController {
             return match key.code {
                 KeyCode::Esc => Intent::CancelDeleteBranch,
                 KeyCode::Enter => Intent::ConfirmDeleteBranch,
+                _ => Intent::None,
+            };
+        }
+
+        if self.app.cleanup_report_is_open() {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Enter => Intent::CloseCleanup,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MoveCleanupScroll(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MoveCleanupScroll(-1),
+                KeyCode::PageDown => Intent::MoveCleanupScrollPage(1),
+                KeyCode::PageUp => Intent::MoveCleanupScrollPage(-1),
+                _ => Intent::None,
+            };
+        }
+
+        if self.app.cleanup_confirmation_is_open() {
+            return match key.code {
+                KeyCode::Esc => Intent::BackCleanupConfirmation,
+                KeyCode::Enter => Intent::ConfirmCleanup,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MoveCleanupScroll(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MoveCleanupScroll(-1),
+                KeyCode::PageDown => Intent::MoveCleanupScrollPage(1),
+                KeyCode::PageUp => Intent::MoveCleanupScrollPage(-1),
+                _ => Intent::None,
+            };
+        }
+
+        if self.app.cleanup_modal_is_open() {
+            return match key.code {
+                KeyCode::Esc => Intent::CloseCleanup,
+                KeyCode::Enter => Intent::ReviewCleanup,
+                KeyCode::Char(' ') => Intent::ToggleCleanupSelection,
+                KeyCode::Char('a') => Intent::SelectAllCleanup,
+                KeyCode::Char('n') => Intent::ClearCleanupSelection,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MoveCleanupSelection(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MoveCleanupSelection(-1),
                 _ => Intent::None,
             };
         }
@@ -257,6 +331,7 @@ impl TuiController {
                 Intent::OpenBranchSearch
             }
             KeyCode::Char('h') => Intent::OpenHelp,
+            KeyCode::Char('c') => Intent::OpenCleanup,
             KeyCode::Enter if matches!(self.app.view, View::Branches) => {
                 match self.app.branch_panel() {
                     BranchPanel::Local => Intent::OpenPicker,
@@ -404,6 +479,50 @@ impl TuiController {
                 self.app.close_delete_branch_confirm();
                 Ok(false)
             }
+            Intent::OpenCleanup => {
+                self.open_cleanup_modal()?;
+                Ok(false)
+            }
+            Intent::CloseCleanup => {
+                self.app.close_cleanup_modal();
+                Ok(false)
+            }
+            Intent::MoveCleanupSelection(delta) => {
+                self.app.move_cleanup_selection(delta);
+                Ok(false)
+            }
+            Intent::MoveCleanupScroll(delta) => {
+                self.app.move_cleanup_scroll(delta);
+                Ok(false)
+            }
+            Intent::MoveCleanupScrollPage(direction) => {
+                self.app.move_cleanup_scroll_page(direction);
+                Ok(false)
+            }
+            Intent::ToggleCleanupSelection => {
+                self.app.toggle_cleanup_selection();
+                Ok(false)
+            }
+            Intent::SelectAllCleanup => {
+                self.app.select_all_cleanup_candidates();
+                Ok(false)
+            }
+            Intent::ClearCleanupSelection => {
+                self.app.clear_cleanup_selection();
+                Ok(false)
+            }
+            Intent::ReviewCleanup => {
+                self.app.begin_cleanup_confirmation();
+                Ok(false)
+            }
+            Intent::BackCleanupConfirmation => {
+                self.app.close_cleanup_confirmation();
+                Ok(false)
+            }
+            Intent::ConfirmCleanup => {
+                self.confirm_cleanup()?;
+                Ok(false)
+            }
             Intent::OpenHelp => {
                 self.app.open_help();
                 Ok(false)
@@ -532,6 +651,64 @@ impl TuiController {
             DeleteBranchTarget::Remote { remote, branch } => self
                 .start_operation_request(OperationRequest::DeleteRemoteBranch { remote, branch }),
         }
+    }
+
+    fn open_cleanup_modal(&mut self) -> anyhow::Result<()> {
+        if self.operation_rx.is_some() {
+            self.app.set_feedback(
+                "Wait for the current operation to finish before cleanup.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
+
+        match self.client.merged_local_branches("HEAD", &[], &[]) {
+            Ok(candidates) => self.app.open_cleanup_modal(candidates),
+            Err(error) => self.app.set_feedback(
+                format!("Could not inspect merged local branches: {error}"),
+                MessageKind::Error,
+            ),
+        }
+        Ok(())
+    }
+
+    fn confirm_cleanup(&mut self) -> anyhow::Result<()> {
+        let branches = self.app.selected_cleanup_branches();
+        if branches.is_empty() {
+            self.app.begin_cleanup_confirmation();
+            return Ok(());
+        }
+
+        self.app.close_cleanup_modal();
+        let request = OperationRequest::CleanupLocalBranches {
+            branches,
+            base: String::from("HEAD"),
+        };
+        self.start_operation_request(request)
+    }
+
+    fn finish_cleanup(&mut self, report: CleanupReport, refresh_warning: Option<String>) {
+        self.app.stop_loading();
+        let refresh_failed = refresh_warning.is_some();
+        let message = match refresh_warning {
+            Some(warning) => format!(
+                "Cleanup finished: {} deleted, {} skipped, {} failed. {warning}",
+                report.deleted, report.skipped, report.failed
+            ),
+            None => format!(
+                "Cleanup finished: {} deleted, {} skipped, {} failed.",
+                report.deleted, report.skipped, report.failed
+            ),
+        };
+        let kind = if report.failed > 0 {
+            MessageKind::Error
+        } else if report.skipped > 0 || refresh_failed {
+            MessageKind::Warning
+        } else {
+            MessageKind::Success
+        };
+        self.app.show_cleanup_report(report);
+        self.app.set_feedback(message, kind);
     }
 
     fn build_operation(&self, action: PickerAction) -> anyhow::Result<OperationRequest> {
