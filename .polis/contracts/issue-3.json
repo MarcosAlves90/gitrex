@@ -12,6 +12,7 @@
       "src/domain/branch.rs",
       "src/git/branch.rs",
       "src/git/command.rs",
+      "src/git/shared.rs",
       "src/tui/app.rs",
       "src/tui/cleanup_tests.rs",
       "src/tui/controller.rs",

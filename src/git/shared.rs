@@ -22,7 +22,9 @@ pub fn parse_history_records(output: &[u8]) -> Result<Vec<HistoryCommit>> {
     }
 
     fields
-        .chunks_exact(5)
+        .as_chunks::<5>()
+        .0
+        .iter()
         .map(|record| {
             let id = parse_utf8(record[0])?;
             let parents = parse_utf8(record[1])?
