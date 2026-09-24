@@ -44,7 +44,7 @@
           "90",
           "--lcov",
           "--output-path",
-          "target/llvm-cov/lcov.info"
+          "target/lcov.info"
         ],
         "cwd": ".",
         "timeout_seconds": 1200,
@@ -65,7 +65,7 @@
         }
       },
       "adapter": "lcov-v1",
-      "report": "target/llvm-cov/lcov.info",
+      "report": "target/lcov.info",
       "operator": "\u003e",
       "threshold_percent": 89.99
     },

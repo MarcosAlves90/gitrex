@@ -4,6 +4,7 @@
   "scope": {
     "allowed_paths": [
       ".polis/contracts/issue-3.json",
+      ".polis/policy.json",
       "README.md",
       "src/cli/args.rs",
       "src/cli/mod.rs",
