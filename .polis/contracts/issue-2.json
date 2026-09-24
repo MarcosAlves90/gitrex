@@ -21,6 +21,7 @@
   "test_scope": {
     "allowed_paths": [
       "src/git/command.rs",
+      "src/tui/app.rs",
       "src/tui/commit_action_tests.rs",
       "src/tui/controller.rs",
       "src/tui/operation_flow.rs",
@@ -28,7 +29,7 @@
       "tests/safety_regressions.rs"
     ]
   },
-  "development_method": "strict_sdd_tdd_v2",
+  "development_method": "strict_sdd_tdd_v1",
   "specification": {
     "objective": "Add safe compare, cherry-pick, and reset workflows to GitRex's existing commit context menu, with explicit targets, confirmations, conflict-aware feedback, and accurate repository refresh.",
     "requirements": [
@@ -120,39 +121,38 @@
         "id": "AC-008",
         "statement": "The existing policy's full tests, Clippy, and at-least-90-percent line coverage pass, alongside formatting and cross-platform CI.",
         "requirements": ["REQ-010"],
-        "proof": "verification"
+        "proof": "regression"
       }
     ],
     "invariants": [
-      "Selected commit identity is captured when its action flow begins.",
-      "Comparison never mutates repository state or contacts a remote.",
-      "Cherry-pick destination is an existing local branch explicitly shown before operation; dirty preflight occurs before switching.",
-      "Cherry-pick conflict state is left for the user and reflected in a refreshed snapshot when possible.",
-      "Reset target is a resolved commit OID; expected current branch and HEAD are rechecked immediately before mutation.",
-      "Reset operates only on the current local branch represented by the displayed graph; detached and remote refs cannot authorize it.",
-      "Soft is the default mode; Hard has a separate explicit confirmation boundary.",
-      "Git receives references and names through direct argv, never shell interpolation.",
-      "No implicit fetch, push, stash, force-push, conflict recovery, or unrelated branch-workflow behavior is introduced."
+      {"id": "INV-001", "statement": "Selected commit identity is captured when its action flow begins."},
+      {"id": "INV-002", "statement": "Comparison never mutates repository state or contacts a remote."},
+      {"id": "INV-003", "statement": "Cherry-pick destination is an existing local branch explicitly shown before operation; dirty preflight occurs before switching."},
+      {"id": "INV-004", "statement": "Cherry-pick conflict state is left for the user and reflected in a refreshed snapshot when possible."},
+      {"id": "INV-005", "statement": "Reset target is a resolved commit OID; expected current branch and HEAD are rechecked immediately before mutation."},
+      {"id": "INV-006", "statement": "Reset operates only on the current local branch represented by the displayed graph; detached and remote refs cannot authorize it."},
+      {"id": "INV-007", "statement": "Soft is the default mode; Hard has a separate explicit confirmation boundary."},
+      {"id": "INV-008", "statement": "Git receives references and names through direct argv, never shell interpolation."},
+      {"id": "INV-009", "statement": "No implicit fetch, push, stash, force-push, conflict recovery, or unrelated branch-workflow behavior is introduced."}
     ],
     "forbidden_states": [
-      "A comparison target is executed without successful commit resolution.",
-      "A dirty cherry-pick request switches away from the current branch.",
-      "A cherry-pick conflict is reported as state-preserving without refreshing or warning about refresh failure.",
-      "A displayed non-current, remote, or detached graph ref can reset the current branch.",
-      "A reset proceeds after its expected branch or HEAD changes.",
-      "Hard reset executes after only the ordinary reset confirmation.",
-      "A conflict is automatically continued, aborted, stashed, or resolved."
+      {"id": "FORBID-001", "statement": "A comparison target is executed without successful commit resolution."},
+      {"id": "FORBID-002", "statement": "A dirty cherry-pick request switches away from the current branch."},
+      {"id": "FORBID-003", "statement": "A cherry-pick conflict is reported as state-preserving without refreshing or warning about refresh failure."},
+      {"id": "FORBID-004", "statement": "A displayed non-current, remote, or detached graph ref can reset the current branch."},
+      {"id": "FORBID-005", "statement": "A reset proceeds after its expected branch or HEAD changes."},
+      {"id": "FORBID-006", "statement": "Hard reset executes after only the ordinary reset confirmation."},
+      {"id": "FORBID-007", "statement": "A conflict is automatically continued, aborted, stashed, or resolved."}
     ],
     "inputs": [
-      "Selected commit OID from the graph history.",
-      "User-entered commit-ish comparison target.",
-      "Selected existing local cherry-pick destination.",
-      "Selected typed reset mode, resolved target OID, expected current branch, and expected HEAD OID."
+      {"id": "IN-001", "statement": "Selected commit OID, comparison commit-ish reference, and an explicitly selected existing local cherry-pick destination."},
+      {"id": "IN-002", "statement": "Typed reset mode, target commit reference, expected current local branch, and expected HEAD OID."},
+      {"id": "IN-003", "statement": "Current graph reference, local branch list, repository status, and selected commit history."}
     ],
     "outputs": [
-      "Bounded, scrollable comparison summary with endpoint identity.",
-      "Cherry-pick success or conflict feedback, recovery guidance, and refreshed repository snapshot when available.",
-      "Reset mode, target, previous/resulting HEAD feedback, and refreshed repository snapshot when available."
+      {"id": "OUT-001", "statement": "Bounded, scrollable comparison summary with resolved endpoint identities and no repository mutation."},
+      {"id": "OUT-002", "statement": "Cherry-pick success or conflict feedback, recovery guidance, and refreshed repository snapshot when available."},
+      {"id": "OUT-003", "statement": "Reset mode, target, previous/resulting HEAD feedback, and refreshed repository snapshot when available."}
     ],
     "failure_semantics": [
       {
@@ -178,35 +178,22 @@
     ]
   },
   "behavior": {
-    "transitions": [
-      "Commit menu -> Compare target input -> asynchronous result -> scroll/close.",
-      "Commit menu -> Cherry-pick local branch selection -> source/destination review -> operation -> refreshed success/conflict result.",
-      "Commit menu -> Reset mode picker (Soft default) -> ordinary confirmation -> Hard-only destructive confirmation -> operation -> refreshed result.",
-      "Esc cancels the current phase and returns to the previous safe phase without starting a mutation."
-    ],
-    "revalidation": [
-      "Resolve source and target refs to commit OIDs in GitClient.",
-      "Before cherry-pick, require clean status and validate an exact existing local destination.",
-      "Before reset, compare actual symbolic local branch and HEAD OID with the confirmed expected values."
-    ]
+    "argv": ["cargo", "test", "--all", "--locked"],
+    "cwd": ".",
+    "timeout_seconds": 1200,
+    "environment": {
+      "mode": "clean",
+      "pass": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE", "LOCALAPPDATA"]
+    }
   },
   "affected": {
-    "components": [
-      "GitClient system-Git command layer",
-      "TUI Commit Actions state, rendering, and keyboard controller",
-      "Asynchronous operation request, execution, outcome, and snapshot refresh",
-      "README and TUI help"
-    ],
-    "interfaces": [
-      "CommitAction menu variants and action flow transitions",
-      "Typed Git reset mode and GitClient compare/cherry-pick/reset methods",
-      "OperationRequest/OperationOutcome and state-changing failure behavior"
-    ],
-    "compatibility": [
-      "No CLI command or output changes.",
-      "Existing checkout-commit and create-branch-from-commit semantics remain.",
-      "System Git remains the runtime backend; no persistent schema changes."
-    ]
+    "argv": ["cargo", "test", "--all", "--locked"],
+    "cwd": ".",
+    "timeout_seconds": 1200,
+    "environment": {
+      "mode": "clean",
+      "pass": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE", "LOCALAPPDATA"]
+    }
   },
   "regression": {
     "mode": "red_green",
