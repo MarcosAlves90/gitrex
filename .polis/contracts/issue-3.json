@@ -265,7 +265,7 @@
             "test",
             "--lib",
             "--locked",
-            "cleanup_candidate_viewport_follows_selection"
+            "cleanup_long_wrapped_candidate_viewport_follows_selection"
           ],
       "cwd": ".",
       "timeout_seconds": 1200,
@@ -287,7 +287,7 @@
     },
     "baseline_exit_code": 101,
           "baseline_output_contains": [
-            "cleanup_candidate_viewport_follows_selection"
+            "cleanup_long_wrapped_candidate_viewport_follows_selection"
     ]
   }
 }
