@@ -1,9 +1,14 @@
 use std::{
+    collections::HashSet,
     ffi::OsString,
     path::{Path, PathBuf},
 };
 
 use crate::domain::error::{GitError, Result};
+use crate::domain::{
+    branch::{BranchCleanupOutcome, BranchCleanupState},
+    BranchInfo,
+};
 
 #[derive(Debug, Clone)]
 pub struct GitClient {
@@ -91,6 +96,131 @@ impl GitClient {
 
     pub fn branches(&self) -> Result<Vec<crate::domain::BranchInfo>> {
         crate::git::branch::list_branches(self)
+    }
+
+    pub fn merged_local_branches(
+        &self,
+        base_reference: &str,
+        exclusions: &[String],
+        upstream_remote: Option<&str>,
+    ) -> Result<Vec<BranchInfo>> {
+        let base_oid = self.resolve_commit(base_reference)?;
+        let git = self.git();
+
+        let base_ref_output = git.probe([
+            "rev-parse",
+            "--symbolic-full-name",
+            "--verify",
+            "--end-of-options",
+            base_reference,
+        ])?;
+        let base_branch = if base_ref_output.success() {
+            let resolved = String::from_utf8(base_ref_output.stdout).map_err(|_| GitError::Utf8)?;
+            resolved
+                .trim()
+                .strip_prefix("refs/heads/")
+                .map(str::to_owned)
+        } else {
+            None
+        };
+
+        let merged_option = format!("--merged={base_oid}");
+        let merged_output = git.run_text([
+            "for-each-ref",
+            merged_option.as_str(),
+            "--format=%(refname:short)",
+            "refs/heads/",
+        ])?;
+        let merged_branches = merged_output
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect::<HashSet<_>>();
+
+        let configured_remotes = if let Some(remote) = upstream_remote {
+            let remotes = git
+                .run_text(["remote"])?
+                .lines()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if !remotes.iter().any(|configured| configured == remote) {
+                return Err(GitError::Backend(format!(
+                    "remote '{remote}' is not configured"
+                )));
+            }
+            Some(remotes)
+        } else {
+            None
+        };
+
+        let mut candidates = self
+            .branches()?
+            .into_iter()
+            .filter(|branch| {
+                !branch.is_remote()
+                    && !branch.current
+                    && base_branch.as_deref() != Some(branch.name.as_str())
+                    && merged_branches.contains(branch.name.as_str())
+                    && !exclusions.iter().any(|excluded| excluded == &branch.name)
+                    && match upstream_remote {
+                        Some(selected_remote) => {
+                            branch.upstream.as_deref().and_then(|upstream| {
+                                configured_remotes
+                                    .as_ref()?
+                                    .iter()
+                                    .filter(|remote| {
+                                        matches!(
+                                            upstream.strip_prefix(remote.as_str()),
+                                            Some(suffix) if suffix.starts_with('/')
+                                        )
+                                    })
+                                    .max_by_key(|remote| remote.len())
+                                    .map(String::as_str)
+                            }) == Some(selected_remote)
+                        }
+                        None => true,
+                    }
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(candidates)
+    }
+
+    pub fn cleanup_local_branch(
+        &self,
+        branch: &str,
+        base_reference: &str,
+        exclusions: &[String],
+        upstream_remote: Option<&str>,
+    ) -> Result<BranchCleanupOutcome> {
+        let still_eligible = self
+            .merged_local_branches(base_reference, exclusions, upstream_remote)?
+            .iter()
+            .any(|candidate| candidate.name == branch);
+        if !still_eligible {
+            return Ok(BranchCleanupOutcome {
+                branch: branch.to_string(),
+                state: BranchCleanupState::Skipped,
+                detail: Some(String::from(
+                    "branch is no longer eligible, is protected, or no longer matches the filters",
+                )),
+            });
+        }
+
+        match self.delete_local_branch(branch) {
+            Ok(()) => Ok(BranchCleanupOutcome {
+                branch: branch.to_string(),
+                state: BranchCleanupState::Deleted,
+                detail: None,
+            }),
+            Err(error) => Ok(BranchCleanupOutcome {
+                branch: branch.to_string(),
+                state: BranchCleanupState::Failed,
+                detail: Some(error.to_string()),
+            }),
+        }
     }
 
     pub fn log(&self, limit: usize) -> Result<Vec<crate::domain::CommitSummary>> {

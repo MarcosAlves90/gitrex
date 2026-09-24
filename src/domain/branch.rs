@@ -61,6 +61,20 @@ impl BranchInfo {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchCleanupState {
+    Deleted,
+    Skipped,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchCleanupOutcome {
+    pub branch: String,
+    pub state: BranchCleanupState,
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteBranchGroup {
     pub remote: String,

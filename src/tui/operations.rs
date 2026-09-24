@@ -1,7 +1,13 @@
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use crate::{domain::RepoSnapshot, git::GitClient};
+use crate::{
+    domain::{
+        branch::{BranchCleanupOutcome, BranchCleanupState},
+        RepoSnapshot,
+    },
+    git::GitClient,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationRequest {
@@ -24,6 +30,10 @@ pub enum OperationRequest {
     DeleteRemoteBranch {
         remote: String,
         branch: String,
+    },
+    CleanupLocalBranches {
+        branches: Vec<String>,
+        base: String,
     },
     Pull {
         remote: Option<String>,
@@ -55,6 +65,9 @@ impl OperationRequest {
             OperationRequest::DeleteRemoteBranch { remote, branch } => {
                 format!("Deleting remote branch {remote}/{branch}")
             }
+            OperationRequest::CleanupLocalBranches { branches, .. } => {
+                format!("Cleaning up {} local branches", branches.len())
+            }
             OperationRequest::Pull { remote, branch }
             | OperationRequest::Push { remote, branch } => {
                 match (remote.as_deref(), branch.as_deref()) {
@@ -83,6 +96,9 @@ impl OperationRequest {
             }
             OperationRequest::DeleteRemoteBranch { remote, branch } => {
                 format!("Deleted remote branch {remote}/{branch}")
+            }
+            OperationRequest::CleanupLocalBranches { branches, .. } => {
+                format!("Cleaned up {} local branches", branches.len())
             }
             OperationRequest::Pull { remote, branch } => {
                 match (remote.as_deref(), branch.as_deref()) {
@@ -113,6 +129,36 @@ pub enum OperationOutcome {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupReport {
+    pub deleted: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub details: String,
+}
+
+const CLEANUP_REPORT_MARKER: &str = "GITREX_CLEANUP_REPORT_V1";
+
+pub fn parse_cleanup_report(message: &str) -> Option<CleanupReport> {
+    let mut lines = message.lines();
+    if lines.next()? != CLEANUP_REPORT_MARKER {
+        return None;
+    }
+    let mut counts = lines.next()?.split('\t');
+    let deleted = counts.next()?.parse().ok()?;
+    let skipped = counts.next()?.parse().ok()?;
+    let failed = counts.next()?.parse().ok()?;
+    if counts.next().is_some() {
+        return None;
+    }
+    Some(CleanupReport {
+        deleted,
+        skipped,
+        failed,
+        details: lines.collect::<Vec<_>>().join("\n"),
+    })
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GitOperationRunner {
     client: GitClient,
@@ -139,6 +185,9 @@ impl GitOperationRunner {
 fn execute_operation(client: GitClient, request: OperationRequest) -> OperationOutcome {
     let success_message = request.success_label();
     let result = match request {
+        OperationRequest::CleanupLocalBranches { branches, base } => {
+            return execute_cleanup(client, branches, base);
+        }
         OperationRequest::Checkout { branch } => client
             .checkout(&branch)
             .map(|_| format!("Checked out {branch}")),
@@ -181,6 +230,64 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
         },
         Err(error) => OperationOutcome::Error(error.to_string()),
     }
+}
+
+fn execute_cleanup(client: GitClient, branches: Vec<String>, base: String) -> OperationOutcome {
+    let outcomes = branches
+        .into_iter()
+        .map(|branch| {
+            client
+                .cleanup_local_branch(&branch, &base, &[], None)
+                .unwrap_or_else(|error| BranchCleanupOutcome {
+                    branch,
+                    state: BranchCleanupState::Failed,
+                    detail: Some(error.to_string()),
+                })
+        })
+        .collect::<Vec<_>>();
+    let message = format_cleanup_report(&outcomes);
+
+    match client.snapshot() {
+        Ok(snapshot) => OperationOutcome::Success { snapshot, message },
+        Err(error) => OperationOutcome::SuccessWithRefreshWarning {
+            message,
+            warning: format!("Repository view refresh failed: {error}"),
+        },
+    }
+}
+
+fn format_cleanup_report(outcomes: &[BranchCleanupOutcome]) -> String {
+    let deleted = outcomes
+        .iter()
+        .filter(|outcome| outcome.state == BranchCleanupState::Deleted)
+        .count();
+    let skipped = outcomes
+        .iter()
+        .filter(|outcome| outcome.state == BranchCleanupState::Skipped)
+        .count();
+    let failed = outcomes
+        .iter()
+        .filter(|outcome| outcome.state == BranchCleanupState::Failed)
+        .count();
+    let mut message = format!("{CLEANUP_REPORT_MARKER}\n{deleted}\t{skipped}\t{failed}");
+    for outcome in outcomes {
+        let label = match outcome.state {
+            BranchCleanupState::Deleted => "deleted",
+            BranchCleanupState::Skipped => "skipped",
+            BranchCleanupState::Failed => "failed",
+        };
+        message.push('\n');
+        message.push_str(label);
+        message.push_str(": ");
+        message.push_str(&outcome.branch);
+        if let Some(detail) = outcome.detail.as_deref() {
+            let detail = detail.replace(['\n', '\r', '\t'], " ");
+            message.push_str(" (");
+            message.push_str(&detail);
+            message.push(')');
+        }
+    }
+    message
 }
 
 #[cfg(test)]

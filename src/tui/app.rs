@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-use super::{branching, layout, theme, widgets};
+use super::{branching, layout, operations::CleanupReport, theme, widgets};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -141,6 +141,12 @@ pub struct App {
     pub(crate) commit_action_index: usize,
     pub(crate) delete_branch_confirm_open: bool,
     pub(crate) delete_branch_target: Option<DeleteBranchTarget>,
+    pub(crate) cleanup_modal_open: bool,
+    pub(crate) cleanup_confirmation_open: bool,
+    pub(crate) cleanup_candidates: Vec<BranchInfo>,
+    pub(crate) cleanup_selected: Vec<bool>,
+    pub(crate) cleanup_selected_index: usize,
+    pub(crate) cleanup_report: Option<CleanupReport>,
     pub(crate) graph_scroll_offset: usize,
     pub(crate) graph_page_size: usize,
     pub(crate) branch_filter: String,
@@ -178,6 +184,12 @@ impl App {
             commit_action_index: 0,
             delete_branch_confirm_open: false,
             delete_branch_target: None,
+            cleanup_modal_open: false,
+            cleanup_confirmation_open: false,
+            cleanup_candidates: Vec::new(),
+            cleanup_selected: Vec::new(),
+            cleanup_selected_index: 0,
+            cleanup_report: None,
             graph_scroll_offset: 0,
             graph_page_size: 1,
             branch_filter: String::new(),
@@ -371,6 +383,105 @@ impl App {
 
     pub fn delete_branch_target(&self) -> Option<DeleteBranchTarget> {
         self.delete_branch_target.clone()
+    }
+
+    pub fn cleanup_modal_is_open(&self) -> bool {
+        self.cleanup_modal_open
+    }
+
+    pub fn cleanup_confirmation_is_open(&self) -> bool {
+        self.cleanup_modal_open && self.cleanup_confirmation_open
+    }
+
+    pub fn cleanup_report_is_open(&self) -> bool {
+        self.cleanup_modal_open && self.cleanup_report.is_some()
+    }
+
+    pub fn open_cleanup_modal(&mut self, candidates: Vec<BranchInfo>) {
+        self.cleanup_modal_open = true;
+        self.cleanup_confirmation_open = false;
+        self.cleanup_report = None;
+        self.cleanup_selected = vec![true; candidates.len()];
+        self.cleanup_candidates = candidates;
+        self.cleanup_selected_index = 0;
+        if self.cleanup_candidates.is_empty() {
+            self.set_feedback(
+                "No merged local branches were found in HEAD.",
+                MessageKind::Warning,
+            );
+        } else {
+            self.set_feedback(
+                "Select merged local branches, then press Enter to review.",
+                MessageKind::Warning,
+            );
+        }
+    }
+
+    pub fn close_cleanup_modal(&mut self) {
+        self.cleanup_modal_open = false;
+        self.cleanup_confirmation_open = false;
+        self.cleanup_candidates.clear();
+        self.cleanup_selected.clear();
+        self.cleanup_selected_index = 0;
+        self.cleanup_report = None;
+    }
+
+    pub fn move_cleanup_selection(&mut self, delta: isize) {
+        let len = self.cleanup_candidates.len();
+        if len == 0 {
+            return;
+        }
+        self.cleanup_selected_index =
+            (self.cleanup_selected_index as isize + delta).rem_euclid(len as isize) as usize;
+    }
+
+    pub fn toggle_cleanup_selection(&mut self) {
+        if let Some(selected) = self.cleanup_selected.get_mut(self.cleanup_selected_index) {
+            *selected = !*selected;
+        }
+    }
+
+    pub fn select_all_cleanup_candidates(&mut self) {
+        self.cleanup_selected.fill(true);
+    }
+
+    pub fn clear_cleanup_selection(&mut self) {
+        self.cleanup_selected.fill(false);
+    }
+
+    pub fn selected_cleanup_branches(&self) -> Vec<String> {
+        self.cleanup_candidates
+            .iter()
+            .zip(&self.cleanup_selected)
+            .filter(|(_, selected)| **selected)
+            .map(|(branch, _)| branch.name.clone())
+            .collect()
+    }
+
+    pub fn begin_cleanup_confirmation(&mut self) -> bool {
+        if self.selected_cleanup_branches().is_empty() {
+            self.set_feedback(
+                "Select at least one branch before continuing.",
+                MessageKind::Warning,
+            );
+            return false;
+        }
+        self.cleanup_confirmation_open = true;
+        self.set_feedback(
+            "Review the cleanup warning, then press Enter to confirm.",
+            MessageKind::Warning,
+        );
+        true
+    }
+
+    pub fn close_cleanup_confirmation(&mut self) {
+        self.cleanup_confirmation_open = false;
+    }
+
+    pub fn show_cleanup_report(&mut self, report: CleanupReport) {
+        self.cleanup_modal_open = true;
+        self.cleanup_confirmation_open = false;
+        self.cleanup_report = Some(report);
     }
 
     pub fn sync_target_display(&self) -> Option<String> {
@@ -839,6 +950,12 @@ impl App {
             frame.render_widget(Clear, area);
             frame.render_widget(popup, area);
         }
+        if self.cleanup_modal_is_open() {
+            let popup = self.render_cleanup_modal();
+            let area = layout::centered_rect(82, 76, frame.area());
+            frame.render_widget(Clear, area);
+            frame.render_widget(popup, area);
+        }
         if self.help_is_open() {
             self.render_help(frame);
         }
@@ -991,7 +1108,7 @@ impl App {
 
         spans.push(Span::raw("  •  "));
         spans.push(Span::styled(
-            "h = help",
+            "h = help • c = cleanup",
             Style::default()
                 .fg(theme::WARNING)
                 .add_modifier(Modifier::BOLD),
@@ -1482,6 +1599,79 @@ impl App {
                     .title_style(theme::panel_title_style(true, theme::ERROR))
                     .borders(Borders::ALL)
                     .border_style(theme::panel_border_style(true, theme::ERROR)),
+            )
+    }
+
+    fn render_cleanup_modal(&self) -> Paragraph<'static> {
+        let (title, body, accent) = if let Some(report) = self.cleanup_report.as_ref() {
+            let mut lines = vec![format!(
+                "{} deleted, {} skipped, {} failed.",
+                report.deleted, report.skipped, report.failed
+            )];
+            if report.details.is_empty() {
+                lines.push(String::from("No branches were selected."));
+            } else {
+                lines.extend(report.details.lines().map(String::from));
+            }
+            lines.push(String::from("Enter or Esc closes this report."));
+            ("Cleanup results", lines.join("\n"), theme::ACCENT)
+        } else if self.cleanup_confirmation_open {
+            let selected = self.selected_cleanup_branches();
+            let names = selected.join("\n  ");
+            (
+                "Confirm cleanup",
+                format!(
+                    "Selected local branches:\n  {names}\n\nOnly local branches are affected. Git's safe branch deletion may refuse a branch that is no longer merged.\nNo remote branches are fetched, pruned, pushed, or deleted.\n\nEnter = confirm cleanup • Esc = back"
+                ),
+                theme::ERROR,
+            )
+        } else {
+            let mut lines = vec![String::from(
+                "Only local branches merged into HEAD are eligible.",
+            )];
+            if self.cleanup_candidates.is_empty() {
+                lines.push(String::from("No merged local branches were found."));
+            } else {
+                lines.push(String::from("Candidates (selected by default):"));
+                lines.extend(
+                    self.cleanup_candidates
+                        .iter()
+                        .enumerate()
+                        .map(|(index, branch)| {
+                            let marker =
+                                if self.cleanup_selected.get(index).copied().unwrap_or(false) {
+                                    "x"
+                                } else {
+                                    " "
+                                };
+                            let current = if index == self.cleanup_selected_index {
+                                "▶"
+                            } else {
+                                " "
+                            };
+                            format!("{current} [{marker}] {}", branch.name)
+                        }),
+                );
+            }
+            lines.push(String::from(
+                "Space toggles • a selects all • n clears • Enter reviews • Esc cancels",
+            ));
+            (
+                "Cleanup merged local branches",
+                lines.join("\n"),
+                theme::ACCENT,
+            )
+        };
+
+        Paragraph::new(body)
+            .style(theme::panel_surface_style(true))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .title(title)
+                    .title_style(theme::panel_title_style(true, accent))
+                    .borders(Borders::ALL)
+                    .border_style(theme::panel_border_style(true, accent)),
             )
     }
 

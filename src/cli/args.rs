@@ -43,5 +43,25 @@ pub enum Commands {
         remote: Option<String>,
         branch: Option<String>,
     },
+    #[command(about = "Preview and safely clean up merged local branches")]
+    Cleanup {
+        #[arg(
+            long,
+            help = "Base commit or ref to compare against (defaults to HEAD)"
+        )]
+        base: Option<String>,
+        #[arg(
+            long = "exclude",
+            help = "Exact local branch name to keep (may be repeated)"
+        )]
+        exclusions: Vec<String>,
+        #[arg(
+            long,
+            help = "Only include branches whose configured upstream uses this remote"
+        )]
+        remote: Option<String>,
+        #[arg(long, help = "Delete eligible branches after previewing the list")]
+        yes: bool,
+    },
     Tui,
 }
