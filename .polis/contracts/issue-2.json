@@ -1,0 +1,225 @@
+{
+  "schema_version": 3,
+  "kind": "feature",
+  "scope": {
+    "allowed_paths": [
+      ".polis/contracts/issue-2.json",
+      "README.md",
+      "src/git/command.rs",
+      "src/git/mod.rs",
+      "src/tui/app.rs",
+      "src/tui/commit_actions.rs",
+      "src/tui/commit_action_tests.rs",
+      "src/tui/controller.rs",
+      "src/tui/mod.rs",
+      "src/tui/operation_flow.rs",
+      "src/tui/operations.rs",
+      "src/tui/widgets.rs",
+      "tests/safety_regressions.rs"
+    ]
+  },
+  "test_scope": {
+    "allowed_paths": [
+      "src/git/command.rs",
+      "src/tui/commit_action_tests.rs",
+      "src/tui/controller.rs",
+      "src/tui/operation_flow.rs",
+      "src/tui/operations.rs",
+      "tests/safety_regressions.rs"
+    ]
+  },
+  "development_method": "strict_sdd_tdd_v2",
+  "specification": {
+    "objective": "Add safe compare, cherry-pick, and reset workflows to GitRex's existing commit context menu, with explicit targets, confirmations, conflict-aware feedback, and accurate repository refresh.",
+    "requirements": [
+      {
+        "id": "REQ-001",
+        "statement": "Preserve Checkout Commit and Create Branch From Commit and add Compare, Cherry-pick, and Reset in the existing commit action menu."
+      },
+      {
+        "id": "REQ-002",
+        "statement": "Resolve the selected commit and a user-entered comparison reference to commit OIDs, then asynchronously display a bounded, scrollable changed-path/stat summary without changing refs, HEAD, index, worktree, or contacting remotes."
+      },
+      {
+        "id": "REQ-003",
+        "statement": "Cherry-pick the selected commit only onto an explicitly selected existing local branch; reject a dirty index/worktree before switching; review source and destination before mutation; and leave the destination active after success or conflict."
+      },
+      {
+        "id": "REQ-004",
+        "statement": "After cherry-pick success or any attempted cherry-pick that can alter repository state, refresh the snapshot; identify conflicts and provide continue/abort guidance without automatic recovery, and report refresh failure explicitly."
+      },
+      {
+        "id": "REQ-005",
+        "statement": "Offer typed Soft, Mixed, and Hard reset modes ordered with Soft selected by default; allow reset only when the displayed graph reference equals the current local branch and there are no unresolved conflicts."
+      },
+      {
+        "id": "REQ-006",
+        "statement": "Before reset, revalidate the expected current branch and HEAD OID in the worker; require explicit confirmation for each mode and a distinct additional destructive confirmation for Hard that shows branch, target, mode effects, and dirty-path information."
+      },
+      {
+        "id": "REQ-007",
+        "statement": "Run repository operations asynchronously; refresh the TUI after successful mutations and state-changing failures, while retaining the one-operation-at-a-time guard."
+      },
+      {
+        "id": "REQ-008",
+        "statement": "Pass references and branch names as direct Git argv data, use system Git, and add no implicit fetch, push, remote mutation, automatic stash, or automatic conflict resolution."
+      },
+      {
+        "id": "REQ-009",
+        "statement": "Update README and TUI help to describe comparison, cherry-pick destination and recovery behavior, reset effects, the Soft default, current-branch restriction, and Hard confirmation."
+      },
+      {
+        "id": "REQ-010",
+        "statement": "Add system-Git and TUI regressions for comparison immutability, cherry-pick success/dirty refusal/conflict refresh, all reset semantics and guards, confirmation/cancel paths, and long result navigation."
+      }
+    ],
+    "acceptance_criteria": [
+      {
+        "id": "AC-001",
+        "statement": "The existing commit menu retains its two actions and exposes Compare, Cherry-pick, and Reset with deterministic selection and cancellation behavior.",
+        "requirements": ["REQ-001"],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-002",
+        "statement": "Comparison resolves commit-ish targets, reports equal or changed endpoints, remains bounded and navigable, and leaves repository state unchanged.",
+        "requirements": ["REQ-002", "REQ-008"],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-003",
+        "statement": "A clean cherry-pick applies the source to the selected local destination; dirty or invalid destinations fail before branch movement; a real conflict remains visible with refreshed status and recovery guidance.",
+        "requirements": ["REQ-003", "REQ-004", "REQ-008"],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-004",
+        "statement": "Soft, Mixed, and Hard produce their distinct Git index/worktree effects; Soft is the initial mode; expected branch or HEAD mismatch aborts before reset.",
+        "requirements": ["REQ-005", "REQ-006"],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-005",
+        "statement": "Remote, detached, non-current graph, and unresolved-conflict contexts cannot enter reset; every reset needs review and Hard requires its extra destructive confirmation.",
+        "requirements": ["REQ-005", "REQ-006"],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-006",
+        "statement": "Successful mutations and state-changing failures refresh repository state; a failed refresh is explicit; no second operation can start while one is active.",
+        "requirements": ["REQ-004", "REQ-007"],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-007",
+        "statement": "README and help copy match tested behavior and explain consequences and recovery.",
+        "requirements": ["REQ-009"],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-008",
+        "statement": "The existing policy's full tests, Clippy, and at-least-90-percent line coverage pass, alongside formatting and cross-platform CI.",
+        "requirements": ["REQ-010"],
+        "proof": "verification"
+      }
+    ],
+    "invariants": [
+      "Selected commit identity is captured when its action flow begins.",
+      "Comparison never mutates repository state or contacts a remote.",
+      "Cherry-pick destination is an existing local branch explicitly shown before operation; dirty preflight occurs before switching.",
+      "Cherry-pick conflict state is left for the user and reflected in a refreshed snapshot when possible.",
+      "Reset target is a resolved commit OID; expected current branch and HEAD are rechecked immediately before mutation.",
+      "Reset operates only on the current local branch represented by the displayed graph; detached and remote refs cannot authorize it.",
+      "Soft is the default mode; Hard has a separate explicit confirmation boundary.",
+      "Git receives references and names through direct argv, never shell interpolation.",
+      "No implicit fetch, push, stash, force-push, conflict recovery, or unrelated branch-workflow behavior is introduced."
+    ],
+    "forbidden_states": [
+      "A comparison target is executed without successful commit resolution.",
+      "A dirty cherry-pick request switches away from the current branch.",
+      "A cherry-pick conflict is reported as state-preserving without refreshing or warning about refresh failure.",
+      "A displayed non-current, remote, or detached graph ref can reset the current branch.",
+      "A reset proceeds after its expected branch or HEAD changes.",
+      "Hard reset executes after only the ordinary reset confirmation.",
+      "A conflict is automatically continued, aborted, stashed, or resolved."
+    ],
+    "inputs": [
+      "Selected commit OID from the graph history.",
+      "User-entered commit-ish comparison target.",
+      "Selected existing local cherry-pick destination.",
+      "Selected typed reset mode, resolved target OID, expected current branch, and expected HEAD OID."
+    ],
+    "outputs": [
+      "Bounded, scrollable comparison summary with endpoint identity.",
+      "Cherry-pick success or conflict feedback, recovery guidance, and refreshed repository snapshot when available.",
+      "Reset mode, target, previous/resulting HEAD feedback, and refreshed repository snapshot when available."
+    ],
+    "failure_semantics": [
+      {
+        "id": "FAIL-001",
+        "statement": "An invalid comparison reference, source commit, or local destination fails before the associated comparison or branch switch."
+      },
+      {
+        "id": "FAIL-002",
+        "statement": "A dirty cherry-pick preflight refuses before switching branches; a failed attempted cherry-pick refreshes repository state and reports conflict/recovery details when present."
+      },
+      {
+        "id": "FAIL-003",
+        "statement": "Reset refuses before mutation when detached, on a different branch/HEAD than expected, on an unresolved conflict, or when the displayed graph is not the current local branch."
+      },
+      {
+        "id": "FAIL-004",
+        "statement": "If a repository mutation is attempted but a subsequent snapshot refresh fails, preserve the mutation result and tell the user to refresh manually."
+      },
+      {
+        "id": "FAIL-005",
+        "statement": "Esc at any input, selection, or confirmation phase cancels without starting the corresponding Git mutation."
+      }
+    ]
+  },
+  "behavior": {
+    "transitions": [
+      "Commit menu -> Compare target input -> asynchronous result -> scroll/close.",
+      "Commit menu -> Cherry-pick local branch selection -> source/destination review -> operation -> refreshed success/conflict result.",
+      "Commit menu -> Reset mode picker (Soft default) -> ordinary confirmation -> Hard-only destructive confirmation -> operation -> refreshed result.",
+      "Esc cancels the current phase and returns to the previous safe phase without starting a mutation."
+    ],
+    "revalidation": [
+      "Resolve source and target refs to commit OIDs in GitClient.",
+      "Before cherry-pick, require clean status and validate an exact existing local destination.",
+      "Before reset, compare actual symbolic local branch and HEAD OID with the confirmed expected values."
+    ]
+  },
+  "affected": {
+    "components": [
+      "GitClient system-Git command layer",
+      "TUI Commit Actions state, rendering, and keyboard controller",
+      "Asynchronous operation request, execution, outcome, and snapshot refresh",
+      "README and TUI help"
+    ],
+    "interfaces": [
+      "CommitAction menu variants and action flow transitions",
+      "Typed Git reset mode and GitClient compare/cherry-pick/reset methods",
+      "OperationRequest/OperationOutcome and state-changing failure behavior"
+    ],
+    "compatibility": [
+      "No CLI command or output changes.",
+      "Existing checkout-commit and create-branch-from-commit semantics remain.",
+      "System Git remains the runtime backend; no persistent schema changes."
+    ]
+  },
+  "regression": {
+    "mode": "red_green",
+    "command": {
+      "argv": ["cargo", "test", "--lib", "--locked", "commit_action_menu_exposes_new_actions"],
+      "cwd": ".",
+      "timeout_seconds": 1200,
+      "environment": {
+        "mode": "clean",
+        "pass": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE", "LOCALAPPDATA"]
+      }
+    },
+    "baseline_exit_code": 101,
+    "baseline_output_contains": ["commit_action_menu_exposes_new_actions"]
+  }
+}
