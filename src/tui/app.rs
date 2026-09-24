@@ -16,6 +16,51 @@ use crate::{
 
 use super::{branching, layout, operations::CleanupReport, theme, widgets};
 
+fn cleanup_wrapped_height(lines: &[Line<'_>], width: usize) -> usize {
+    let width = width.max(1);
+    lines
+        .iter()
+        .map(|line| {
+            let text = line.to_string();
+            let words = text.split_whitespace().collect::<Vec<_>>();
+            if words.is_empty() {
+                return 1;
+            }
+
+            let leading_whitespace = text
+                .chars()
+                .take_while(|character| character.is_whitespace())
+                .collect::<String>();
+            let mut rows: usize = 1;
+            let mut current_width = Line::from(leading_whitespace).width();
+            for word in words {
+                let word_width = Line::from(word).width();
+                if current_width > 0
+                    && current_width.saturating_add(1).saturating_add(word_width) > width
+                {
+                    rows += 1;
+                    current_width = 0;
+                }
+
+                if word_width > width {
+                    let word_rows = word_width.div_ceil(width);
+                    rows = rows.saturating_add(word_rows.saturating_sub(1));
+                    current_width = word_width % width;
+                    if current_width == 0 {
+                        current_width = width;
+                    }
+                } else {
+                    if current_width > 0 {
+                        current_width += 1;
+                    }
+                    current_width += word_width;
+                }
+            }
+            rows
+        })
+        .sum()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Branches,
@@ -146,6 +191,8 @@ pub struct App {
     pub(crate) cleanup_candidates: Vec<BranchInfo>,
     pub(crate) cleanup_selected: Vec<bool>,
     pub(crate) cleanup_selected_index: usize,
+    pub(crate) cleanup_scroll_offset: usize,
+    pub(crate) cleanup_scroll_page_size: usize,
     pub(crate) cleanup_report: Option<CleanupReport>,
     pub(crate) graph_scroll_offset: usize,
     pub(crate) graph_page_size: usize,
@@ -189,6 +236,8 @@ impl App {
             cleanup_candidates: Vec::new(),
             cleanup_selected: Vec::new(),
             cleanup_selected_index: 0,
+            cleanup_scroll_offset: 0,
+            cleanup_scroll_page_size: 1,
             cleanup_report: None,
             graph_scroll_offset: 0,
             graph_page_size: 1,
@@ -404,6 +453,8 @@ impl App {
         self.cleanup_selected = vec![true; candidates.len()];
         self.cleanup_candidates = candidates;
         self.cleanup_selected_index = 0;
+        self.cleanup_scroll_offset = 0;
+        self.cleanup_scroll_page_size = 1;
         if self.cleanup_candidates.is_empty() {
             self.set_feedback(
                 "No merged local branches were found in HEAD.",
@@ -423,6 +474,8 @@ impl App {
         self.cleanup_candidates.clear();
         self.cleanup_selected.clear();
         self.cleanup_selected_index = 0;
+        self.cleanup_scroll_offset = 0;
+        self.cleanup_scroll_page_size = 1;
         self.cleanup_report = None;
     }
 
@@ -433,6 +486,21 @@ impl App {
         }
         self.cleanup_selected_index =
             (self.cleanup_selected_index as isize + delta).rem_euclid(len as isize) as usize;
+    }
+
+    pub fn move_cleanup_scroll(&mut self, delta: isize) {
+        self.cleanup_scroll_offset = self.cleanup_scroll_offset.saturating_add_signed(delta);
+    }
+
+    pub fn move_cleanup_scroll_page(&mut self, direction: isize) {
+        let delta = self
+            .cleanup_scroll_page_size
+            .saturating_mul(direction.unsigned_abs());
+        if direction < 0 {
+            self.cleanup_scroll_offset = self.cleanup_scroll_offset.saturating_sub(delta);
+        } else {
+            self.cleanup_scroll_offset = self.cleanup_scroll_offset.saturating_add(delta);
+        }
     }
 
     pub fn toggle_cleanup_selection(&mut self) {
@@ -467,6 +535,7 @@ impl App {
             return false;
         }
         self.cleanup_confirmation_open = true;
+        self.cleanup_scroll_offset = 0;
         self.set_feedback(
             "Review the cleanup warning, then press Enter to confirm.",
             MessageKind::Warning,
@@ -476,12 +545,14 @@ impl App {
 
     pub fn close_cleanup_confirmation(&mut self) {
         self.cleanup_confirmation_open = false;
+        self.cleanup_scroll_offset = 0;
     }
 
     pub fn show_cleanup_report(&mut self, report: CleanupReport) {
         self.cleanup_modal_open = true;
         self.cleanup_confirmation_open = false;
         self.cleanup_report = Some(report);
+        self.cleanup_scroll_offset = 0;
     }
 
     pub fn sync_target_display(&self) -> Option<String> {
@@ -951,10 +1022,9 @@ impl App {
             frame.render_widget(popup, area);
         }
         if self.cleanup_modal_is_open() {
-            let popup = self.render_cleanup_modal();
             let area = layout::centered_rect(82, 76, frame.area());
             frame.render_widget(Clear, area);
-            frame.render_widget(popup, area);
+            self.render_cleanup_modal(frame, area);
         }
         if self.help_is_open() {
             self.render_help(frame);
@@ -1602,77 +1672,193 @@ impl App {
             )
     }
 
-    fn render_cleanup_modal(&self) -> Paragraph<'static> {
-        let (title, body, accent) = if let Some(report) = self.cleanup_report.as_ref() {
-            let mut lines = vec![format!(
+    fn render_cleanup_modal(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let (title, accent) = if self.cleanup_report.is_some() {
+            ("Cleanup results", theme::ACCENT)
+        } else if self.cleanup_confirmation_open {
+            ("Confirm cleanup", theme::ERROR)
+        } else {
+            ("Cleanup merged local branches", theme::ACCENT)
+        };
+        let block = Block::default()
+            .title(title)
+            .title_style(theme::panel_title_style(true, accent))
+            .borders(Borders::ALL)
+            .border_style(theme::panel_border_style(true, accent));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let [content_area, footer_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(inner);
+        if self.cleanup_report.is_some() {
+            let lines = self.cleanup_report_lines();
+            self.render_cleanup_scrolled_text(frame, content_area, lines);
+            Self::render_cleanup_footer(
+                frame,
+                footer_area,
+                "j/k scroll • PgUp/PgDn page",
+                "Enter/Esc close report",
+            );
+        } else if self.cleanup_confirmation_open {
+            let lines = self.cleanup_confirmation_lines();
+            self.render_cleanup_scrolled_text(frame, content_area, lines);
+            Self::render_cleanup_footer(
+                frame,
+                footer_area,
+                "j/k scroll • PgUp/PgDn page",
+                "Enter confirm • Esc back",
+            );
+        } else {
+            self.render_cleanup_candidates(frame, content_area);
+            Self::render_cleanup_footer(
+                frame,
+                footer_area,
+                "j/k move • Space toggle • a all • n none",
+                "Enter review • Esc cancel",
+            );
+        }
+    }
+
+    fn cleanup_confirmation_lines(&self) -> Vec<Line<'static>> {
+        let selected = self.selected_cleanup_branches();
+        let mut lines = vec![Line::from("Selected local branches:")];
+        if selected.is_empty() {
+            lines.push(Line::from("No branches selected."));
+        } else {
+            lines.extend(
+                selected
+                    .into_iter()
+                    .map(|branch| Line::from(format!("  {branch}"))),
+            );
+        }
+        lines.extend([
+            Line::from(""),
+            Line::from("Only local branches are affected."),
+            Line::from("Git's safe branch deletion may refuse a branch that is no longer merged."),
+            Line::from("No remote branches are fetched, pruned, pushed, or deleted."),
+        ]);
+        lines
+    }
+
+    fn cleanup_report_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        if let Some(report) = self.cleanup_report.as_ref() {
+            lines.push(Line::from(format!(
                 "{} deleted, {} skipped, {} failed.",
                 report.deleted, report.skipped, report.failed
-            )];
+            )));
             if report.details.is_empty() {
-                lines.push(String::from("No branches were selected."));
+                lines.push(Line::from("No branches were selected."));
             } else {
-                lines.extend(report.details.lines().map(String::from));
-            }
-            lines.push(String::from("Enter or Esc closes this report."));
-            ("Cleanup results", lines.join("\n"), theme::ACCENT)
-        } else if self.cleanup_confirmation_open {
-            let selected = self.selected_cleanup_branches();
-            let names = selected.join("\n  ");
-            (
-                "Confirm cleanup",
-                format!(
-                    "Selected local branches:\n  {names}\n\nOnly local branches are affected. Git's safe branch deletion may refuse a branch that is no longer merged.\nNo remote branches are fetched, pruned, pushed, or deleted.\n\nEnter = confirm cleanup • Esc = back"
-                ),
-                theme::ERROR,
-            )
-        } else {
-            let mut lines = vec![String::from(
-                "Only local branches merged into HEAD are eligible.",
-            )];
-            if self.cleanup_candidates.is_empty() {
-                lines.push(String::from("No merged local branches were found."));
-            } else {
-                lines.push(String::from("Candidates (selected by default):"));
                 lines.extend(
-                    self.cleanup_candidates
-                        .iter()
-                        .enumerate()
-                        .map(|(index, branch)| {
-                            let marker =
-                                if self.cleanup_selected.get(index).copied().unwrap_or(false) {
-                                    "x"
-                                } else {
-                                    " "
-                                };
-                            let current = if index == self.cleanup_selected_index {
-                                "▶"
-                            } else {
-                                " "
-                            };
-                            format!("{current} [{marker}] {}", branch.name)
-                        }),
+                    report
+                        .details
+                        .lines()
+                        .map(|line| Line::from(line.to_owned())),
                 );
             }
-            lines.push(String::from(
-                "Space toggles • a selects all • n clears • Enter reviews • Esc cancels",
-            ));
-            (
-                "Cleanup merged local branches",
-                lines.join("\n"),
-                theme::ACCENT,
-            )
-        };
+        }
+        lines
+    }
 
-        Paragraph::new(body)
-            .style(theme::panel_surface_style(true))
-            .wrap(Wrap { trim: true })
-            .block(
-                Block::default()
-                    .title(title)
-                    .title_style(theme::panel_title_style(true, accent))
-                    .borders(Borders::ALL)
-                    .border_style(theme::panel_border_style(true, accent)),
-            )
+    fn render_cleanup_candidates(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let selected_count = self
+            .cleanup_selected
+            .iter()
+            .filter(|selected| **selected)
+            .count();
+        let mut lines = vec![Line::from(format!(
+            "{selected_count}/{} selected",
+            self.cleanup_candidates.len()
+        ))];
+        if self.cleanup_candidates.is_empty() {
+            lines.push(Line::from("No merged local branches were found."));
+        } else {
+            lines.extend(
+                self.cleanup_candidates
+                    .iter()
+                    .enumerate()
+                    .map(|(index, branch)| {
+                        let marker = if self.cleanup_selected.get(index).copied().unwrap_or(false) {
+                            "x"
+                        } else {
+                            " "
+                        };
+                        let current = if index == self.cleanup_selected_index {
+                            "▶"
+                        } else {
+                            " "
+                        };
+                        Line::from(format!("{current} [{marker}] {}", branch.name))
+                    }),
+            );
+        }
+
+        let viewport_height = area.height as usize;
+        let width = area.width.max(1) as usize;
+        let total_height = cleanup_wrapped_height(&lines, width);
+        let max_offset = total_height.saturating_sub(viewport_height);
+        let mut offset = self.cleanup_scroll_offset.min(max_offset);
+        if !self.cleanup_candidates.is_empty() && viewport_height > 0 {
+            let line_index = self
+                .cleanup_selected_index
+                .saturating_add(1)
+                .min(lines.len() - 1);
+            let selected_start = cleanup_wrapped_height(&lines[..line_index], width);
+            let selected_height = cleanup_wrapped_height(&lines[line_index..=line_index], width);
+            if selected_start < offset {
+                offset = selected_start;
+            }
+            if selected_start.saturating_add(selected_height)
+                > offset.saturating_add(viewport_height)
+            {
+                offset = selected_start
+                    .saturating_add(selected_height)
+                    .saturating_sub(viewport_height);
+            }
+        }
+        self.cleanup_scroll_offset = offset.min(max_offset);
+        self.cleanup_scroll_page_size = viewport_height.max(1);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(theme::panel_surface_style(true))
+                .scroll((self.cleanup_scroll_offset.min(u16::MAX as usize) as u16, 0))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
+
+    fn render_cleanup_scrolled_text(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        lines: Vec<Line<'static>>,
+    ) {
+        let viewport_height = area.height as usize;
+        let content_height = cleanup_wrapped_height(&lines, area.width.max(1) as usize);
+        let max_offset = content_height.saturating_sub(viewport_height);
+        self.cleanup_scroll_offset = self.cleanup_scroll_offset.min(max_offset);
+        self.cleanup_scroll_page_size = viewport_height.max(1);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(theme::panel_surface_style(true))
+                .scroll((self.cleanup_scroll_offset.min(u16::MAX as usize) as u16, 0))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
+
+    fn render_cleanup_footer(
+        frame: &mut Frame<'_>,
+        area: Rect,
+        first: &'static str,
+        second: &'static str,
+    ) {
+        frame.render_widget(
+            Paragraph::new(vec![Line::from(first), Line::from(second)])
+                .style(theme::panel_surface_style(true)),
+            area,
+        );
     }
 
     fn branch_state(&self) -> ListState {

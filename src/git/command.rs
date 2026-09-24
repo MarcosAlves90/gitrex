@@ -102,7 +102,7 @@ impl GitClient {
         &self,
         base_reference: &str,
         exclusions: &[String],
-        upstream_remote: Option<&str>,
+        upstream_remotes: &[String],
     ) -> Result<Vec<BranchInfo>> {
         let base_oid = self.resolve_commit(base_reference)?;
         let git = self.git();
@@ -137,7 +137,7 @@ impl GitClient {
             .filter(|name| !name.is_empty())
             .collect::<HashSet<_>>();
 
-        let configured_remotes = if let Some(remote) = upstream_remote {
+        let configured_remotes = if !upstream_remotes.is_empty() {
             let remotes = git
                 .run_text(["remote"])?
                 .lines()
@@ -145,10 +145,12 @@ impl GitClient {
                 .filter(|name| !name.is_empty())
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            if !remotes.iter().any(|configured| configured == remote) {
-                return Err(GitError::Backend(format!(
-                    "remote '{remote}' is not configured"
-                )));
+            for selected in upstream_remotes {
+                if !remotes.iter().any(|configured| configured == selected) {
+                    return Err(GitError::Backend(format!(
+                        "remote '{selected}' is not configured"
+                    )));
+                }
             }
             Some(remotes)
         } else {
@@ -164,11 +166,12 @@ impl GitClient {
                     && base_branch.as_deref() != Some(branch.name.as_str())
                     && merged_branches.contains(branch.name.as_str())
                     && !exclusions.iter().any(|excluded| excluded == &branch.name)
-                    && match upstream_remote {
-                        Some(selected_remote) => {
-                            branch.upstream.as_deref().and_then(|upstream| {
-                                configured_remotes
-                                    .as_ref()?
+                    && match configured_remotes.as_ref() {
+                        Some(remotes) => branch
+                            .upstream
+                            .as_deref()
+                            .and_then(|upstream| {
+                                remotes
                                     .iter()
                                     .filter(|remote| {
                                         matches!(
@@ -178,8 +181,10 @@ impl GitClient {
                                     })
                                     .max_by_key(|remote| remote.len())
                                     .map(String::as_str)
-                            }) == Some(selected_remote)
-                        }
+                            })
+                            .is_some_and(|resolved| {
+                                upstream_remotes.iter().any(|selected| selected == resolved)
+                            }),
                         None => true,
                     }
             })
@@ -193,10 +198,10 @@ impl GitClient {
         branch: &str,
         base_reference: &str,
         exclusions: &[String],
-        upstream_remote: Option<&str>,
+        upstream_remotes: &[String],
     ) -> Result<BranchCleanupOutcome> {
         let still_eligible = self
-            .merged_local_branches(base_reference, exclusions, upstream_remote)?
+            .merged_local_branches(base_reference, exclusions, upstream_remotes)?
             .iter()
             .any(|candidate| candidate.name == branch);
         if !still_eligible {

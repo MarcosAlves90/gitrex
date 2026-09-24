@@ -56,10 +56,10 @@ pub enum Commands {
         )]
         exclusions: Vec<String>,
         #[arg(
-            long,
-            help = "Only include branches whose configured upstream uses this remote"
+            long = "remote",
+            help = "Only include branches whose configured upstream uses one of these remotes (may be repeated)"
         )]
-        remote: Option<String>,
+        remotes: Vec<String>,
         #[arg(long, help = "Delete eligible branches after previewing the list")]
         yes: bool,
     },

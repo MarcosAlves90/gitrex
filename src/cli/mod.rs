@@ -48,9 +48,9 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
         Some(Commands::Cleanup {
             base,
             exclusions,
-            remote,
+            remotes,
             yes,
-        }) => execute_cleanup(&client, base, exclusions, remote, yes)?,
+        }) => execute_cleanup(&client, base, exclusions, remotes, yes)?,
         Some(Commands::Tui) | None => {
             output::print_help_hint();
         }
@@ -63,11 +63,11 @@ fn execute_cleanup(
     client: &GitClient,
     base: Option<String>,
     exclusions: Vec<String>,
-    remote: Option<String>,
+    remotes: Vec<String>,
     yes: bool,
 ) -> anyhow::Result<()> {
     let base = base.unwrap_or_else(|| String::from("HEAD"));
-    let candidates = client.merged_local_branches(&base, &exclusions, remote.as_deref())?;
+    let candidates = client.merged_local_branches(&base, &exclusions, &remotes)?;
 
     output::print_message(&format!("Merged local branches reachable from {base}:"));
     if candidates.is_empty() {
@@ -87,7 +87,7 @@ fn execute_cleanup(
         .iter()
         .map(|candidate| {
             client
-                .cleanup_local_branch(&candidate.name, &base, &exclusions, remote.as_deref())
+                .cleanup_local_branch(&candidate.name, &base, &exclusions, &remotes)
                 .unwrap_or_else(|error| BranchCleanupOutcome {
                     branch: candidate.name.clone(),
                     state: BranchCleanupState::Failed,

@@ -48,6 +48,13 @@ fn controller_with_merged_branch() -> (TempDir, TuiController) {
 }
 
 fn controller_with_many_merged_branches(count: usize) -> (TempDir, TuiController) {
+    let branches = (0..count)
+        .map(|index| format!("feature/branch-{index:02}"))
+        .collect::<Vec<_>>();
+    controller_with_branch_names(&branches)
+}
+
+fn controller_with_branch_names(branches: &[String]) -> (TempDir, TuiController) {
     let temp = tempfile::tempdir().unwrap();
     checked_git(temp.path(), &["init", "--quiet"]);
     checked_git(temp.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
@@ -56,14 +63,43 @@ fn controller_with_many_merged_branches(count: usize) -> (TempDir, TuiController
     fs::write(temp.path().join("base.txt"), "base\n").unwrap();
     checked_git(temp.path(), &["add", "-A"]);
     checked_git(temp.path(), &["commit", "--quiet", "-m", "initial commit"]);
-    for index in 0..count {
-        let branch = format!("feature/branch-{index:02}");
+    for branch in branches {
         checked_git(temp.path(), &["branch", "--", branch.as_str(), "HEAD"]);
     }
 
     let mut controller = TuiController::new(GitClient::from_path(temp.path()));
     controller.refresh().unwrap();
     (temp, controller)
+}
+
+#[test]
+fn cleanup_long_wrapped_candidate_viewport_follows_selection() {
+    let mut branches = (0..8)
+        .map(|index| format!("feature/branch-{index:02}"))
+        .collect::<Vec<_>>();
+    let long_branch = format!(
+        "feature/{}{}{}",
+        "z".repeat(4),
+        "a".repeat(35),
+        "z".repeat(35)
+    );
+    branches.push(long_branch);
+    let (_temp, mut controller) = controller_with_branch_names(&branches);
+
+    key(&mut controller, KeyCode::Char('c'));
+    for _ in 0..8 {
+        key(&mut controller, KeyCode::Char('j'));
+    }
+
+    let candidates = render_text_at(&mut controller, 60, 14);
+    assert!(
+        candidates.contains("▶ [x]"),
+        "selected long candidate is outside the viewport: {candidates}"
+    );
+    assert!(
+        candidates.contains("feature/") && candidates.contains(&"z".repeat(25)),
+        "wrapped continuation of selected branch is outside the viewport: {candidates}"
+    );
 }
 
 fn key(controller: &mut TuiController, code: KeyCode) {

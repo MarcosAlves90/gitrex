@@ -180,6 +180,8 @@ enum Intent {
     OpenCleanup,
     CloseCleanup,
     MoveCleanupSelection(isize),
+    MoveCleanupScroll(isize),
+    MoveCleanupScrollPage(isize),
     ToggleCleanupSelection,
     SelectAllCleanup,
     ClearCleanupSelection,
@@ -211,6 +213,10 @@ impl TuiController {
         if self.app.cleanup_report_is_open() {
             return match key.code {
                 KeyCode::Esc | KeyCode::Enter => Intent::CloseCleanup,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MoveCleanupScroll(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MoveCleanupScroll(-1),
+                KeyCode::PageDown => Intent::MoveCleanupScrollPage(1),
+                KeyCode::PageUp => Intent::MoveCleanupScrollPage(-1),
                 _ => Intent::None,
             };
         }
@@ -219,6 +225,10 @@ impl TuiController {
             return match key.code {
                 KeyCode::Esc => Intent::BackCleanupConfirmation,
                 KeyCode::Enter => Intent::ConfirmCleanup,
+                KeyCode::Char('j') | KeyCode::Down => Intent::MoveCleanupScroll(1),
+                KeyCode::Char('k') | KeyCode::Up => Intent::MoveCleanupScroll(-1),
+                KeyCode::PageDown => Intent::MoveCleanupScrollPage(1),
+                KeyCode::PageUp => Intent::MoveCleanupScrollPage(-1),
                 _ => Intent::None,
             };
         }
@@ -481,6 +491,14 @@ impl TuiController {
                 self.app.move_cleanup_selection(delta);
                 Ok(false)
             }
+            Intent::MoveCleanupScroll(delta) => {
+                self.app.move_cleanup_scroll(delta);
+                Ok(false)
+            }
+            Intent::MoveCleanupScrollPage(direction) => {
+                self.app.move_cleanup_scroll_page(direction);
+                Ok(false)
+            }
             Intent::ToggleCleanupSelection => {
                 self.app.toggle_cleanup_selection();
                 Ok(false)
@@ -644,7 +662,7 @@ impl TuiController {
             return Ok(());
         }
 
-        match self.client.merged_local_branches("HEAD", &[], None) {
+        match self.client.merged_local_branches("HEAD", &[], &[]) {
             Ok(candidates) => self.app.open_cleanup_modal(candidates),
             Err(error) => self.app.set_feedback(
                 format!("Could not inspect merged local branches: {error}"),

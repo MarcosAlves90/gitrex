@@ -241,7 +241,7 @@ flowchart LR
 - In the local branch panel, branch actions also include deleting the selected local branch after confirmation
 - In the remote branch panel, branch actions include creating a local branch, checking out detached HEAD, or deleting the selected remote branch after confirmation
 
-The cleanup review lists local branches whose tips are reachable from `HEAD`. Branches are selected by default; use `Space` to toggle one, `a` to select all, and `n` to clear the selection. `Enter` opens a warning with the selected names; press `Enter` again to confirm or `Esc` to go back or cancel. The cleanup checks each branch again and uses Git's safe `branch -d` deletion. Current and base branches are protected. The operation only changes local branch refs and does not fetch, prune, push, or delete remote branches.
+The cleanup review lists local branches whose tips are reachable from `HEAD`. Branches are selected by default; use `j`/`k` to move through the list, `Space` to toggle one, `a` to select all, and `n` to clear the selection. The selected branch stays in view when the list is longer than the terminal. `Enter` opens a scrollable warning with the selected names; press `Enter` again to confirm or `Esc` to go back or cancel. The result report also supports scrolling with `j`/`k` or `PgUp`/`PgDn`. The cleanup checks each branch again and uses Git's safe `branch -d` deletion. Current and base branches are protected. The operation only changes local branch refs and does not fetch, prune, push, or delete remote branches.
 
 ### Graph workspace
 
@@ -289,10 +289,10 @@ The help screen is scrollable:
 ```bash
 gitrex cleanup
 gitrex cleanup --base main --exclude keep-this --exclude release/next
-gitrex cleanup --base main --remote origin --yes
+gitrex cleanup --base main --remote origin --remote upstream --yes
 ```
 
-The default base is the current `HEAD`. Use `--base <ref>` to choose another commit or ref, `--exclude <name>` one or more times to preserve exact local branch names, and `--remote <name>` to include only branches with an upstream on that configured remote. Remote filtering reads local Git configuration and does not contact the remote. Without `--yes`, the command only prints the candidates. With `--yes`, it rechecks each candidate and attempts `git branch -d -- <name>`, reporting deleted, skipped, and failed branches separately.
+The default base is the current `HEAD`. Use `--base <ref>` to choose another commit or ref, `--exclude <name>` one or more times to preserve exact local branch names, and `--remote <name>` one or more times to include branches whose upstream uses any selected configured remote. Remote filtering reads local Git configuration and does not contact the remotes. Without `--yes`, the command only prints the candidates. With `--yes`, it rechecks each candidate against the same filters and attempts `git branch -d -- <name>`, reporting deleted, skipped, and failed branches separately.
 
 Cleanup is based on commit ancestry: a branch tip must be an ancestor of the base commit. A squash merge or rebase can preserve the changes while producing different commit IDs, so those branches may not appear as merged. Git's safe deletion check is repeated for every branch and may still refuse a branch when Git sees unmerged commits.
 

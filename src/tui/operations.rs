@@ -237,7 +237,7 @@ fn execute_cleanup(client: GitClient, branches: Vec<String>, base: String) -> Op
         .into_iter()
         .map(|branch| {
             client
-                .cleanup_local_branch(&branch, &base, &[], None)
+                .cleanup_local_branch(&branch, &base, &[], &[])
                 .unwrap_or_else(|error| BranchCleanupOutcome {
                     branch,
                     state: BranchCleanupState::Failed,
