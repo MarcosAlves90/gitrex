@@ -12,6 +12,7 @@ use tempfile::TempDir;
 use crate::git::GitClient;
 
 use super::controller::TuiController;
+use super::operations::CleanupReport;
 
 fn git(repository: &Path, arguments: &[&str]) -> Output {
     Command::new("git")
@@ -46,6 +47,25 @@ fn controller_with_merged_branch() -> (TempDir, TuiController) {
     (temp, controller)
 }
 
+fn controller_with_many_merged_branches(count: usize) -> (TempDir, TuiController) {
+    let temp = tempfile::tempdir().unwrap();
+    checked_git(temp.path(), &["init", "--quiet"]);
+    checked_git(temp.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    checked_git(temp.path(), &["config", "user.name", "Gitrex Test"]);
+    checked_git(temp.path(), &["config", "user.email", "gitrex@example.com"]);
+    fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+    checked_git(temp.path(), &["add", "-A"]);
+    checked_git(temp.path(), &["commit", "--quiet", "-m", "initial commit"]);
+    for index in 0..count {
+        let branch = format!("feature/branch-{index:02}");
+        checked_git(temp.path(), &["branch", "--", branch.as_str(), "HEAD"]);
+    }
+
+    let mut controller = TuiController::new(GitClient::from_path(temp.path()));
+    controller.refresh().unwrap();
+    (temp, controller)
+}
+
 fn key(controller: &mut TuiController, code: KeyCode) {
     controller
         .handle_event(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
@@ -53,7 +73,11 @@ fn key(controller: &mut TuiController, code: KeyCode) {
 }
 
 fn render_text(controller: &mut TuiController) -> String {
-    let backend = ratatui::backend::TestBackend::new(120, 40);
+    render_text_at(controller, 120, 40)
+}
+
+fn render_text_at(controller: &mut TuiController, width: u16, height: u16) -> String {
+    let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| controller.app_mut().render(frame))
@@ -66,6 +90,69 @@ fn render_text(controller: &mut TuiController) -> String {
         .map(|cell| cell.symbol())
         .collect::<Vec<_>>()
         .concat()
+}
+
+#[test]
+fn cleanup_candidate_viewport_follows_selection() {
+    let (_temp, mut controller) = controller_with_many_merged_branches(24);
+
+    key(&mut controller, KeyCode::Char('c'));
+    for _ in 1..24 {
+        key(&mut controller, KeyCode::Char('j'));
+    }
+
+    let candidates = render_text_at(&mut controller, 60, 14);
+    assert!(
+        candidates.contains("▶ [x] feature/branch-23"),
+        "selected final candidate is outside the viewport: {candidates}"
+    );
+}
+
+#[test]
+fn cleanup_confirmation_and_report_allow_scrolling_to_last_entry() {
+    let (_temp, mut controller) = controller_with_many_merged_branches(24);
+
+    key(&mut controller, KeyCode::Char('c'));
+    key(&mut controller, KeyCode::Enter);
+    let warning = render_text_at(&mut controller, 60, 14);
+    assert!(warning.contains("feature/branch-00"));
+    assert!(
+        warning.contains("j/k scroll"),
+        "confirmation does not advertise scrolling: {warning}"
+    );
+    for _ in 0..4 {
+        key(&mut controller, KeyCode::PageDown);
+    }
+    let warning_end = render_text_at(&mut controller, 60, 14);
+    assert!(
+        warning_end.contains("feature/branch-23"),
+        "confirmation cannot scroll to the final selected branch: {warning_end}"
+    );
+
+    let details = (0..24)
+        .map(|index| format!("deleted: feature/branch-{index:02}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    controller.app_mut().show_cleanup_report(CleanupReport {
+        deleted: 24,
+        skipped: 0,
+        failed: 0,
+        details,
+    });
+    let report = render_text_at(&mut controller, 60, 14);
+    assert!(report.contains("deleted: feature/branch-00"));
+    assert!(
+        report.contains("j/k scroll"),
+        "report does not advertise scrolling: {report}"
+    );
+    for _ in 0..4 {
+        key(&mut controller, KeyCode::PageDown);
+    }
+    let report_end = render_text_at(&mut controller, 60, 14);
+    assert!(
+        report_end.contains("deleted: feature/branch-23"),
+        "report cannot scroll to the final result: {report_end}"
+    );
 }
 
 #[test]

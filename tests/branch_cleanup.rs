@@ -58,27 +58,35 @@ fn cleanup_preview_lists_merged_candidates_without_deleting_them() {
 }
 
 #[test]
-fn cleanup_uses_explicit_base_and_applies_remote_and_exact_exclusion_filters() {
+fn cleanup_accepts_multiple_selected_remotes_and_applies_exact_exclusions() {
     let (temp, repo) = initialized_repo();
     create_branch(&repo, "release", "main");
     checkout_branch(&repo, "release");
     write_file(temp.path(), "release.txt", "release change\n");
     let release_oid = commit_all(&repo, "release change");
 
-    create_branch(&repo, "feature/release-tracked", "release");
-    create_branch(&repo, "feature/release-excluded", "release");
-    create_branch(&repo, "feature/release-untracked", "release");
-    repo.remote("origin", "https://example.invalid/gitrex.git")
+    for remote in ["origin", "upstream", "third"] {
+        repo.remote(remote, "https://example.invalid/gitrex.git")
+            .unwrap();
+        let reference = format!("refs/remotes/{remote}/release");
+        repo.reference(
+            &reference,
+            release_oid.clone(),
+            false,
+            "fixture remote-tracking ref",
+        )
         .unwrap();
-    repo.reference(
-        "refs/remotes/origin/release",
-        release_oid,
-        false,
-        "fixture remote-tracking ref",
-    )
-    .unwrap();
-    set_upstream(&repo, "feature/release-tracked", "origin/release");
-    set_upstream(&repo, "feature/release-excluded", "origin/release");
+    }
+
+    create_branch(&repo, "feature/origin", "release");
+    create_branch(&repo, "feature/upstream", "release");
+    create_branch(&repo, "feature/third", "release");
+    create_branch(&repo, "feature/excluded", "release");
+    create_branch(&repo, "feature/untracked", "release");
+    set_upstream(&repo, "feature/origin", "origin/release");
+    set_upstream(&repo, "feature/upstream", "upstream/release");
+    set_upstream(&repo, "feature/third", "third/release");
+    set_upstream(&repo, "feature/excluded", "origin/release");
     checkout_branch(&repo, "main");
 
     let output = run_gitrex(
@@ -89,23 +97,33 @@ fn cleanup_uses_explicit_base_and_applies_remote_and_exact_exclusion_filters() {
             "release",
             "--remote",
             "origin",
+            "--remote",
+            "upstream",
             "--exclude",
-            "feature/release-excluded",
+            "feature/excluded",
         ],
     );
     let text = output_text(&output);
 
     assert!(output.status.success(), "filtered preview failed: {text}");
     assert!(
-        text.contains("feature/release-tracked"),
-        "explicit base candidate was not listed: {text}"
+        text.contains("feature/origin"),
+        "origin candidate was not listed: {text}"
     );
     assert!(
-        !text.contains("feature/release-excluded"),
+        text.contains("feature/upstream"),
+        "upstream candidate was not listed: {text}"
+    );
+    assert!(
+        !text.contains("feature/third"),
+        "branch from an unselected remote appeared in preview: {text}"
+    );
+    assert!(
+        !text.contains("feature/excluded"),
         "exactly excluded branch appeared in preview: {text}"
     );
     assert!(
-        !text.contains("feature/release-untracked"),
+        !text.contains("feature/untracked"),
         "branch without the selected remote upstream appeared: {text}"
     );
 }
