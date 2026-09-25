@@ -1,0 +1,247 @@
+{
+  "schema_version": 3,
+  "kind": "feature",
+  "scope": {
+    "allowed_paths": [
+      ".polis/contracts/issue-9.json",
+      "Cargo.lock",
+      "Cargo.toml",
+      "README.md",
+      "src/cli/args.rs",
+      "src/cli/mod.rs",
+      "src/cli/output.rs",
+      "src/cli/protocol.rs",
+      "tests/cli_protocol.rs",
+      "tests/fixtures/protocol/v1/branch.json",
+      "tests/fixtures/protocol/v1/capabilities.json",
+      "tests/fixtures/protocol/v1/log.json",
+      "tests/fixtures/protocol/v1/not-repository.json",
+      "tests/fixtures/protocol/v1/status.json"
+    ]
+  },
+  "test_scope": {
+    "allowed_paths": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "tests/cli_protocol.rs",
+      "tests/fixtures/protocol/v1/branch.json",
+      "tests/fixtures/protocol/v1/capabilities.json",
+      "tests/fixtures/protocol/v1/log.json",
+      "tests/fixtures/protocol/v1/not-repository.json",
+      "tests/fixtures/protocol/v1/status.json"
+    ]
+  },
+  "development_method": "strict_sdd_tdd_v1",
+  "specification": {
+    "objective": "Establish a versioned machine-readable JSON protocol for GitRex read-only CLI commands and capability discovery while preserving the human interface.",
+    "requirements": [
+      {
+        "id": "REQ-001",
+        "statement": "Support --format json for status, branch, and log, keep human-readable output as the default, and serialize existing domain results without adding Git or network operations."
+      },
+      {
+        "id": "REQ-002",
+        "statement": "Return machine responses in a public envelope containing schema_version, operation identity, ok, data on success, structured error on failure, and optional warnings; define protocol types independently from internal domain structures."
+      },
+      {
+        "id": "REQ-003",
+        "statement": "Map GitNotInstalled, NotRepository, ReferenceNotFound, CommandFailed, Diverged, Backend, Parse, Utf8, and Io errors to the stable public codes GIT_NOT_INSTALLED, NOT_A_REPOSITORY, REFERENCE_NOT_FOUND, COMMAND_FAILED, DIVERGED, BACKEND_ERROR, PARSE_ERROR, and INVALID_UTF8; include retryability when known and relevant structured details such as divergence counts."
+      },
+      {
+        "id": "REQ-004",
+        "statement": "Provide deterministic capabilities --format json output with GitRex and schema versions, supported formats, and every CLI operation classified by all effects it can produce. For composite operations such as tui, report the union of effects reachable through its actions, including read-only, local-mutation, network-access, and remote-mutation where applicable; discovery must perform no network I/O and must not imply authorization."
+      },
+      {
+        "id": "REQ-005",
+        "statement": "Document all stable protocol fields, compatibility/versioning rules, operation effects, and exit codes; add representative versioned JSON fixtures and regressions that expose response changes."
+      }
+    ],
+    "acceptance_criteria": [
+      {
+        "id": "AC-001",
+        "statement": "status, branch, and log accept --format json, emit valid deterministic versioned envelopes using their existing domain values, and retain their current human-readable default output.",
+        "requirements": [
+          "REQ-001",
+          "REQ-002"
+        ],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-002",
+        "statement": "Successes and Git failures use the same envelope; every GitError variant maps to a listed stable code, known details are structured, optional retryability is truthful, and JSON operation failures exit nonzero while useful human errors remain available.",
+        "requirements": [
+          "REQ-002",
+          "REQ-003"
+        ],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-003",
+        "statement": "Capabilities report package and schema versions, supported output formats, and the full set of effects for every operation in deterministic order without invoking Git or the network. Composite operations such as tui include the union of effects reachable through their actions; output states that capability is descriptive and grants no authorization.",
+        "requirements": [
+          "REQ-004"
+        ],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-004",
+        "statement": "README documents each public field, version compatibility, operation effects, and exit statuses; representative status, branch, log, error, and capabilities fixtures are asserted by tests, with fixtures stored under their protocol schema version.",
+        "requirements": [
+          "REQ-005"
+        ],
+        "proof": "regression"
+      }
+    ],
+    "invariants": [
+      {
+        "id": "INV-001",
+        "statement": "The public schema is expressed by explicit protocol types and is independent of internal Rust names, field layout, and serialization derives."
+      },
+      {
+        "id": "INV-002",
+        "statement": "Existing command output stays human-readable unless JSON is explicitly requested."
+      },
+      {
+        "id": "INV-003",
+        "statement": "Capabilities are a static description and never execute, authorize, or imply execution of a listed operation."
+      }
+    ],
+    "forbidden_states": [
+      {
+        "id": "FORBID-001",
+        "statement": "Do not serialize internal domain structs directly as the public protocol."
+      },
+      {
+        "id": "FORBID-002",
+        "statement": "Do not add Git or network operations to JSON rendering or capability discovery."
+      },
+      {
+        "id": "FORBID-003",
+        "statement": "Do not classify an indeterminate error as retryable or non-retryable; omit retryability when it cannot be established."
+      }
+    ],
+    "inputs": [
+      {
+        "id": "IN-001",
+        "statement": "CLI invocations of status, branch, or log with optional --format json and the existing domain result or GitError."
+      },
+      {
+        "id": "IN-002",
+        "statement": "CLI invocation of capabilities --format json without repository state or network access."
+      }
+    ],
+    "outputs": [
+      {
+        "id": "OUT-001",
+        "statement": "A deterministic public JSON success or failure envelope with stable field names and value types."
+      },
+      {
+        "id": "OUT-002",
+        "statement": "A text response identical in behavior to the existing read-only CLI output when --format is omitted."
+      },
+      {
+        "id": "OUT-003",
+        "statement": "Capabilities with GitRex version, schema version, output formats, and ordered operations plus effect classifications."
+      }
+    ],
+    "failure_semantics": [
+      {
+        "id": "FAIL-001",
+        "statement": "A Git operation error in JSON mode writes a failure envelope to stdout, retains its human-readable error on stderr, and exits nonzero."
+      },
+      {
+        "id": "FAIL-002",
+        "statement": "Human mode continues to return the existing error through the current top-level CLI error path."
+      },
+      {
+        "id": "FAIL-003",
+        "statement": "Invalid CLI syntax continues to use Clap's existing usage-error behavior and is documented separately from operation failures."
+      }
+    ]
+  },
+  "behavior": {
+    "argv": [
+      "cargo",
+      "test",
+      "--all",
+      "--locked"
+    ],
+    "cwd": ".",
+    "timeout_seconds": 1200,
+    "environment": {
+      "mode": "clean",
+      "pass": [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SystemRoot",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "LOCALAPPDATA"
+      ]
+    }
+  },
+  "affected": {
+    "argv": [
+      "cargo",
+      "test",
+      "--test",
+      "cli_protocol",
+      "--locked"
+    ],
+    "cwd": ".",
+    "timeout_seconds": 1200,
+    "environment": {
+      "mode": "clean",
+      "pass": [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SystemRoot",
+        "COMSPEC",
+        "PATHEXT",
+        "USERPROFILE",
+        "LOCALAPPDATA"
+      ]
+    }
+  },
+  "regression": {
+    "mode": "red_green",
+    "command": {
+      "argv": [
+        "cargo",
+        "test",
+        "--test",
+        "cli_protocol",
+        "--locked",
+        "machine_protocol_capabilities_matches_v1_fixture_without_git"
+      ],
+      "cwd": ".",
+      "timeout_seconds": 1200,
+      "environment": {
+        "mode": "clean",
+        "pass": [
+          "PATH",
+          "HOME",
+          "TMPDIR",
+          "TMP",
+          "TEMP",
+          "SystemRoot",
+          "COMSPEC",
+          "PATHEXT",
+          "USERPROFILE",
+          "LOCALAPPDATA"
+        ]
+      }
+    },
+    "baseline_exit_code": 101,
+    "baseline_output_contains": [
+      "machine_protocol_capabilities_matches_v1_fixture_without_git"
+    ]
+  }
+}

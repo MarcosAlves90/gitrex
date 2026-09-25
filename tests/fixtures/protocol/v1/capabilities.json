@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "operation": "capabilities",
+  "ok": true,
+  "data": {
+    "gitrex_version": "<version>",
+    "protocol_schema_version": 1,
+    "supported_output_formats": [
+      "text",
+      "json"
+    ],
+    "operations": [
+      {
+        "name": "branch",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
+      },
+      {
+        "name": "capabilities",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
+      },
+      {
+        "name": "checkout",
+        "effects": ["local_mutation"],
+        "output_formats": ["text"]
+      },
+      {
+        "name": "cleanup",
+        "effects": ["local_mutation"],
+        "output_formats": ["text"]
+      },
+      {
+        "name": "clone",
+        "effects": ["local_mutation", "network_access"],
+        "output_formats": ["text"]
+      },
+      {
+        "name": "create-branch",
+        "effects": ["local_mutation"],
+        "output_formats": ["text"]
+      },
+      {
+        "name": "fetch",
+        "effects": ["local_mutation", "network_access"],
+        "output_formats": ["text"]
+      },
+      {
+        "name": "log",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
+      },
+      {
+        "name": "pull",
+        "effects": ["local_mutation", "network_access"],
+        "output_formats": ["text"]
+      },
+      {
+        "name": "push",
+        "effects": ["network_access", "remote_mutation"],
+        "output_formats": ["text"]
+      },
+      {
+        "name": "status",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
+      },
+      {
+        "name": "switch",
+        "effects": ["local_mutation"],
+        "output_formats": ["text"]
+      },
+      {
+        "name": "tui",
+        "effects": ["read_only", "local_mutation", "network_access", "remote_mutation"],
+        "output_formats": []
+      }
+    ],
+    "authorization": {
+      "granted": false,
+      "note": "Listing an operation does not authorize it; normal CLI and repository checks still apply."
+    }
+  }
+}
