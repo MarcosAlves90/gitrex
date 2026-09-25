@@ -66,6 +66,12 @@ fn json_command(repository: &Path, arguments: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).expect("valid JSON response")
 }
 
+fn normalized_path(path: &str) -> String {
+    path.strip_prefix(r"\\?\")
+        .unwrap_or(path)
+        .replace('\\', "/")
+}
+
 #[test]
 fn inspect_returns_versioned_repository_context() {
     let repository = repository();
@@ -101,14 +107,18 @@ fn inspect_returns_versioned_repository_context() {
     assert_eq!(response["operation"], "inspect");
     assert_eq!(response["ok"], true);
     assert_eq!(response["data"]["scope"], "minimal");
+    let actual_root = response["data"]["repository"]["root"]
+        .as_str()
+        .expect("repository root is a string");
+    let expected_root = repository
+        .path()
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string();
     assert_eq!(
-        response["data"]["repository"]["root"],
-        repository
-            .path()
-            .canonicalize()
-            .unwrap()
-            .display()
-            .to_string()
+        normalized_path(actual_root),
+        normalized_path(&expected_root)
     );
     assert_eq!(response["data"]["head"]["branch"], "main");
     assert_eq!(response["data"]["head"]["commit"], head);
