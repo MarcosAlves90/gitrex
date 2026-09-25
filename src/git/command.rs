@@ -1035,7 +1035,9 @@ mod tests {
             Some(base)
         );
         assert_eq!(
-            std::fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            std::fs::read_to_string(temp.path().join("tracked.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "base\n"
         );
         assert!(client.status().unwrap().files.is_empty());

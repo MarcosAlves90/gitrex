@@ -2185,7 +2185,9 @@ mod tests {
 
         assert_eq!(client.resolve_commit("HEAD").unwrap(), base);
         assert_eq!(
-            fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            fs::read_to_string(temp.path().join("tracked.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "base\n"
         );
         assert!(temp.path().join("dirty-27.txt").exists());
