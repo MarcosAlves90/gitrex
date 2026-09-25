@@ -2,6 +2,7 @@ pub mod branch;
 pub mod error;
 pub mod history;
 pub mod log;
+pub mod repository_context;
 pub mod snapshot;
 pub mod status;
 
