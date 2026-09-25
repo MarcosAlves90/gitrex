@@ -72,7 +72,7 @@
       },
       {
         "name": "tui",
-        "effects": ["local_mutation"],
+        "effects": ["read_only", "local_mutation", "network_access", "remote_mutation"],
         "output_formats": []
       }
     ],

@@ -271,6 +271,7 @@ pub(crate) fn capabilities() -> CapabilitiesData {
     const LOCAL: &[Effect] = &[Local];
     const LOCAL_NETWORK: &[Effect] = &[Local, Network];
     const NETWORK_REMOTE: &[Effect] = &[Network, RemoteMutation];
+    const TUI_EFFECTS: &[Effect] = &[ReadOnly, Local, Network, RemoteMutation];
 
     let operations = vec![
         Operation {
@@ -335,7 +336,7 @@ pub(crate) fn capabilities() -> CapabilitiesData {
         },
         Operation {
             name: "tui",
-            effects: LOCAL,
+            effects: TUI_EFFECTS,
             output_formats: NO_FORMATS,
         },
     ];

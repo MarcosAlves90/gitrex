@@ -339,6 +339,8 @@ The stable data fields are:
 
 Each capabilities operation has name (string), effects (array of effect names), and output_formats (string array). The authorization object has granted (boolean, always false) and note (string). Empty collections are returned as empty arrays.
 
+Effects list every kind of change an operation can perform. For the composite `tui` operation, the list is the union of effects available through its actions, including read-only, local mutation, network access, and remote mutation.
+
 Error code is the stable machine identifier. message is a human-readable diagnostic string and may change. retryable is an optional boolean and is omitted when uncertain. Optional details is an object: REFERENCE_NOT_FOUND includes reference (string), COMMAND_FAILED includes command (string) and may include exit_code (integer), and DIVERGED includes ahead and behind (integers). I/O and backend failures share BACKEND_ERROR.
 
 | Code | Meaning |
