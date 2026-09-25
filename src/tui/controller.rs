@@ -4,8 +4,8 @@ use crate::git::GitClient;
 
 use super::{
     app::{
-        App, BranchPanel, CommitAction, DeleteBranchTarget, MessageKind, PickerAction,
-        RemoteBranchAction, View,
+        App, BranchPanel, CommitAction, CommitActionFlow, DeleteBranchTarget, MessageKind,
+        PickerAction, RemoteBranchAction, ResetReview, View,
     },
     operation_flow,
     operations::{
@@ -18,6 +18,13 @@ pub struct TuiController {
     app: App,
     runner: GitOperationRunner,
     operation_rx: Option<std::sync::mpsc::Receiver<OperationOutcome>>,
+}
+
+fn status_has_unresolved_conflicts(status: &crate::domain::RepoStatus) -> bool {
+    status
+        .files
+        .iter()
+        .any(|entry| entry.code.contains('U') || matches!(entry.code.as_str(), "AA" | "DD"))
 }
 
 impl TuiController {
@@ -169,6 +176,22 @@ enum Intent {
     ConfirmPicker,
     ConfirmRemotePicker,
     ConfirmCommitAction,
+    BackToCommitActionMenu,
+    TypeCompareTarget(char),
+    DeleteCompareTargetChar,
+    ConfirmCompareTarget,
+    MoveCommitActionScroll(isize),
+    MoveCommitActionScrollPage(isize),
+    MoveCherryPickTarget(isize),
+    ConfirmCherryPickTarget,
+    BackToCherryPickTargets,
+    ConfirmCherryPick,
+    MoveResetMode(isize),
+    ConfirmResetMode,
+    BackToResetModePicker,
+    ConfirmReset,
+    BackToResetConfirmation,
+    ConfirmHardReset,
     ConfirmDeleteBranch,
     CancelDeleteBranch,
     OpenHelp,
@@ -287,12 +310,63 @@ impl TuiController {
         }
 
         if self.app.commit_actions_are_open() {
-            return match key.code {
-                KeyCode::Esc => Intent::CloseCommitActions,
-                KeyCode::Enter => Intent::ConfirmCommitAction,
-                KeyCode::Char('j') | KeyCode::Down => Intent::MoveCommitAction(1),
-                KeyCode::Char('k') | KeyCode::Up => Intent::MoveCommitAction(-1),
-                _ => Intent::None,
+            return match self.app.commit_action_flow.as_ref() {
+                Some(CommitActionFlow::Menu { .. }) => match key.code {
+                    KeyCode::Esc => Intent::CloseCommitActions,
+                    KeyCode::Enter => Intent::ConfirmCommitAction,
+                    KeyCode::Char('j') | KeyCode::Down => Intent::MoveCommitAction(1),
+                    KeyCode::Char('k') | KeyCode::Up => Intent::MoveCommitAction(-1),
+                    _ => Intent::None,
+                },
+                Some(CommitActionFlow::CompareTarget { .. }) => match key.code {
+                    KeyCode::Esc => Intent::BackToCommitActionMenu,
+                    KeyCode::Enter => Intent::ConfirmCompareTarget,
+                    KeyCode::Backspace => Intent::DeleteCompareTargetChar,
+                    KeyCode::Char(character) => Intent::TypeCompareTarget(character),
+                    _ => Intent::None,
+                },
+                Some(CommitActionFlow::CompareResult { .. }) => match key.code {
+                    KeyCode::Esc | KeyCode::Enter => Intent::BackToCommitActionMenu,
+                    KeyCode::Char('j') | KeyCode::Down => Intent::MoveCommitActionScroll(1),
+                    KeyCode::Char('k') | KeyCode::Up => Intent::MoveCommitActionScroll(-1),
+                    KeyCode::PageDown => Intent::MoveCommitActionScrollPage(1),
+                    KeyCode::PageUp => Intent::MoveCommitActionScrollPage(-1),
+                    _ => Intent::None,
+                },
+                Some(CommitActionFlow::CherryPickTarget { .. }) => match key.code {
+                    KeyCode::Esc => Intent::BackToCommitActionMenu,
+                    KeyCode::Enter => Intent::ConfirmCherryPickTarget,
+                    KeyCode::Char('j') | KeyCode::Down => Intent::MoveCherryPickTarget(1),
+                    KeyCode::Char('k') | KeyCode::Up => Intent::MoveCherryPickTarget(-1),
+                    _ => Intent::None,
+                },
+                Some(CommitActionFlow::CherryPickConfirmation { .. }) => match key.code {
+                    KeyCode::Esc => Intent::BackToCherryPickTargets,
+                    KeyCode::Enter => Intent::ConfirmCherryPick,
+                    _ => Intent::None,
+                },
+                Some(CommitActionFlow::ResetModePicker { .. }) => match key.code {
+                    KeyCode::Esc => Intent::BackToCommitActionMenu,
+                    KeyCode::Enter => Intent::ConfirmResetMode,
+                    KeyCode::Char('j') | KeyCode::Down => Intent::MoveResetMode(1),
+                    KeyCode::Char('k') | KeyCode::Up => Intent::MoveResetMode(-1),
+                    _ => Intent::None,
+                },
+                Some(CommitActionFlow::ResetConfirmation { .. }) => match key.code {
+                    KeyCode::Esc => Intent::BackToResetModePicker,
+                    KeyCode::Enter => Intent::ConfirmReset,
+                    _ => Intent::None,
+                },
+                Some(CommitActionFlow::HardResetConfirmation { .. }) => match key.code {
+                    KeyCode::Esc => Intent::BackToResetConfirmation,
+                    KeyCode::Char('y') => Intent::ConfirmHardReset,
+                    KeyCode::Char('j') | KeyCode::Down => Intent::MoveCommitActionScroll(1),
+                    KeyCode::Char('k') | KeyCode::Up => Intent::MoveCommitActionScroll(-1),
+                    KeyCode::PageDown => Intent::MoveCommitActionScrollPage(1),
+                    KeyCode::PageUp => Intent::MoveCommitActionScrollPage(-1),
+                    _ => Intent::None,
+                },
+                None => Intent::None,
             };
         }
 
@@ -471,6 +545,101 @@ impl TuiController {
                 self.confirm_commit_action()?;
                 Ok(false)
             }
+            Intent::BackToCommitActionMenu => {
+                self.app.back_to_commit_action_menu();
+                Ok(false)
+            }
+            Intent::TypeCompareTarget(character) => {
+                self.app.type_compare_target_char(character);
+                Ok(false)
+            }
+            Intent::DeleteCompareTargetChar => {
+                self.app.delete_compare_target_char();
+                Ok(false)
+            }
+            Intent::ConfirmCompareTarget => {
+                if let Some((source, target)) = self.app.compare_target_request() {
+                    self.start_operation_request(OperationRequest::CompareCommits {
+                        left_reference: source,
+                        right_reference: target,
+                    })?;
+                } else {
+                    self.app.set_feedback(
+                        "Enter a commit or branch reference before comparing.",
+                        MessageKind::Warning,
+                    );
+                }
+                Ok(false)
+            }
+            Intent::MoveCommitActionScroll(delta) => {
+                self.app.move_commit_action_scroll(delta);
+                Ok(false)
+            }
+            Intent::MoveCommitActionScrollPage(direction) => {
+                self.app.move_commit_action_scroll_page(direction);
+                Ok(false)
+            }
+            Intent::MoveCherryPickTarget(delta) => {
+                self.app.move_cherry_pick_target(delta);
+                Ok(false)
+            }
+            Intent::ConfirmCherryPickTarget => {
+                if !self.app.open_cherry_pick_confirmation() {
+                    self.app.set_feedback(
+                        "Select a local destination branch first.",
+                        MessageKind::Warning,
+                    );
+                }
+                Ok(false)
+            }
+            Intent::BackToCherryPickTargets => {
+                self.app.back_to_cherry_pick_targets();
+                Ok(false)
+            }
+            Intent::ConfirmCherryPick => {
+                self.start_confirmed_cherry_pick()?;
+                Ok(false)
+            }
+            Intent::MoveResetMode(delta) => {
+                self.app.move_reset_mode(delta);
+                Ok(false)
+            }
+            Intent::ConfirmResetMode => {
+                if !self.app.open_reset_confirmation() {
+                    self.app
+                        .set_feedback("Choose a reset mode first.", MessageKind::Warning);
+                }
+                Ok(false)
+            }
+            Intent::BackToResetModePicker => {
+                self.app.back_to_reset_mode_picker();
+                Ok(false)
+            }
+            Intent::ConfirmReset => {
+                if self
+                    .app
+                    .reset_request()
+                    .is_some_and(|(_, mode, _, _)| mode == crate::git::ResetMode::Hard)
+                {
+                    if !self.app.open_hard_reset_confirmation() {
+                        self.app.set_feedback(
+                            "Hard reset requires its separate destructive confirmation.",
+                            MessageKind::Warning,
+                        );
+                    }
+                } else {
+                    self.start_confirmed_reset()?;
+                }
+                Ok(false)
+            }
+            Intent::BackToResetConfirmation => {
+                self.app.back_to_reset_confirmation();
+                Ok(false)
+            }
+            Intent::ConfirmHardReset => {
+                self.start_confirmed_reset()?;
+                Ok(false)
+            }
             Intent::ConfirmDeleteBranch => {
                 self.confirm_delete_branch()?;
                 Ok(false)
@@ -608,33 +777,114 @@ impl TuiController {
     }
 
     fn confirm_commit_action(&mut self) -> anyhow::Result<()> {
-        let action = *self
-            .app
-            .commit_actions()
-            .get(self.app.commit_action_index)
-            .unwrap_or(&CommitAction::CheckoutCommit);
-        self.app.close_commit_actions();
+        let Some((action, source)) = self.app.selected_commit_action() else {
+            self.app
+                .set_feedback("No commit action is selected.", MessageKind::Warning);
+            return Ok(());
+        };
 
         match action {
             CommitAction::CheckoutCommit => {
-                let target = self
-                    .app
-                    .selected_commit()
-                    .map(|commit| commit.hash.clone())
-                    .ok_or_else(|| anyhow::anyhow!("No commit selected."))?;
-                self.start_operation_from_target(target)
+                self.app.close_commit_actions();
+                self.start_operation_from_target(source)
             }
             CommitAction::CreateBranchFromCommit => {
-                let source = self
-                    .app
-                    .selected_commit()
-                    .map(|commit| commit.hash.clone())
-                    .ok_or_else(|| anyhow::anyhow!("No commit selected."))?;
+                self.app.close_commit_actions();
                 self.app
                     .open_branch_creator_from_source(source, crate::tui::theme::PURPLE);
                 Ok(())
             }
+            CommitAction::CompareCommit => {
+                self.app.open_compare_target(source);
+                Ok(())
+            }
+            CommitAction::CherryPickCommit => {
+                self.app.open_cherry_pick_target(source);
+                Ok(())
+            }
+            CommitAction::ResetCurrentBranch => self.open_reset_mode_picker(source),
         }
+    }
+
+    fn open_reset_mode_picker(&mut self, target: String) -> anyhow::Result<()> {
+        let Some(status) = self.app.status.as_ref() else {
+            self.app.set_feedback(
+                "Reset is unavailable until repository status is loaded.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        };
+        if status.branch_name == "HEAD" || status.branch_name.trim().is_empty() {
+            self.app.set_feedback(
+                "Reset requires a checked-out local branch; detached HEAD is read-only here.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
+        let branch = status.branch_name.clone();
+        if self.app.selected_graph_ref().as_deref() != Some(branch.as_str()) {
+            self.app.set_feedback(
+                "Reset is available only when the graph displays the current local branch.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
+        if status_has_unresolved_conflicts(status) {
+            self.app.set_feedback(
+                "Resolve the current Git conflicts before starting a reset flow.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
+
+        let dirty_paths = status
+            .files
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        let expected_head = self
+            .client
+            .resolve_commit("HEAD")
+            .map_err(anyhow::Error::msg)?;
+        self.app.open_reset_mode_picker(ResetReview {
+            target,
+            branch,
+            expected_head,
+            dirty_paths,
+        });
+        Ok(())
+    }
+
+    fn start_confirmed_cherry_pick(&mut self) -> anyhow::Result<()> {
+        let Some((source, destination)) = self.app.cherry_pick_request() else {
+            self.app.set_feedback(
+                "Review a local cherry-pick destination before confirming.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        };
+        self.app.close_commit_actions();
+        self.start_operation_request(OperationRequest::CherryPick {
+            source,
+            destination,
+        })
+    }
+
+    fn start_confirmed_reset(&mut self) -> anyhow::Result<()> {
+        let Some((target, mode, expected_branch, expected_head)) = self.app.reset_request() else {
+            self.app.set_feedback(
+                "Review the reset target and mode before confirming.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        };
+        self.app.close_commit_actions();
+        self.start_operation_request(OperationRequest::Reset {
+            target,
+            mode,
+            expected_branch,
+            expected_head,
+        })
     }
 
     fn confirm_delete_branch(&mut self) -> anyhow::Result<()> {
@@ -782,14 +1032,23 @@ impl TuiController {
 mod tests {
     use super::{DeleteBranchTarget, Intent, TuiController, View};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use std::{
+        fs,
+        path::Path,
+        process::{Command, Output},
+        thread,
+        time::{Duration, Instant},
+    };
+    use tempfile::TempDir;
 
     use crate::test_support::{
         checkout_branch, commit_all, configure_user, create_branch, current_dir_lock, init_repo,
         write_file, CurrentDirGuard,
     };
     use crate::{
-        domain::{BranchInfo, BranchKind, CommitSummary, RepoStatus},
-        git::GitClient,
+        domain::{BranchInfo, BranchKind, CommitSummary, RepoStatus, StatusEntry},
+        git::{GitClient, ResetMode},
+        tui::app::CommitActionFlow,
     };
 
     #[test]
@@ -1615,5 +1874,378 @@ mod tests {
             controller.app().message_kind,
             crate::tui::app::MessageKind::Error
         );
+    }
+
+    fn commit_action_git(repository: &Path, arguments: &[&str]) -> Output {
+        Command::new("git")
+            .current_dir(repository)
+            .args(arguments)
+            .output()
+            .unwrap()
+    }
+
+    fn commit_action_checked_git(repository: &Path, arguments: &[&str]) -> String {
+        let output = commit_action_git(repository, arguments);
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn commit_action_init_repository() -> (TempDir, String) {
+        let temp = tempfile::tempdir().unwrap();
+        commit_action_checked_git(temp.path(), &["init", "--quiet"]);
+        commit_action_checked_git(temp.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        commit_action_checked_git(temp.path(), &["config", "user.name", "Gitrex Test"]);
+        commit_action_checked_git(temp.path(), &["config", "user.email", "gitrex@example.com"]);
+        fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
+        commit_action_checked_git(temp.path(), &["add", "-A"]);
+        commit_action_checked_git(temp.path(), &["commit", "--quiet", "-m", "base"]);
+        let base = commit_action_checked_git(temp.path(), &["rev-parse", "HEAD"]);
+        (temp, base)
+    }
+
+    fn commit_action_linear_controller(
+        changed_paths: usize,
+        dirty_paths: usize,
+    ) -> (TempDir, TuiController, String, String) {
+        let (temp, base) = commit_action_init_repository();
+        commit_action_checked_git(temp.path(), &["branch", "aaa-destination", base.as_str()]);
+        fs::write(temp.path().join("tracked.txt"), "target\n").unwrap();
+        for index in 0..changed_paths {
+            fs::write(
+                temp.path().join(format!("changed-{index:02}.txt")),
+                format!("content {index}\n"),
+            )
+            .unwrap();
+        }
+        commit_action_checked_git(temp.path(), &["add", "-A"]);
+        commit_action_checked_git(temp.path(), &["commit", "--quiet", "-m", "target"]);
+        let target = commit_action_checked_git(temp.path(), &["rev-parse", "HEAD"]);
+
+        fs::write(temp.path().join("tracked.txt"), "local edit\n").unwrap();
+        for index in 0..dirty_paths {
+            fs::write(
+                temp.path().join(format!("dirty-{index:02}.txt")),
+                format!("untracked {index}\n"),
+            )
+            .unwrap();
+        }
+
+        let mut controller = TuiController::new(GitClient::from_path(temp.path()));
+        controller.refresh().unwrap();
+        (temp, controller, base, target)
+    }
+
+    fn commit_action_press(controller: &mut TuiController, code: KeyCode) {
+        controller
+            .handle_event(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+            .unwrap();
+    }
+
+    fn commit_action_open(controller: &mut TuiController, index: usize) {
+        controller.app_mut().select_view(View::Log);
+        commit_action_press(controller, KeyCode::Enter);
+        for _ in 0..index {
+            commit_action_press(controller, KeyCode::Char('j'));
+        }
+        commit_action_press(controller, KeyCode::Enter);
+    }
+
+    fn commit_action_render(controller: &mut TuiController, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| controller.app_mut().render(frame))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<Vec<_>>()
+            .concat()
+    }
+
+    fn commit_action_wait(controller: &mut TuiController) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while controller.app().loading.is_some() {
+            controller.poll_operation().unwrap();
+            assert!(Instant::now() < deadline, "Git operation did not finish");
+            thread::sleep(Duration::from_millis(10));
+        }
+        controller.poll_operation().unwrap();
+    }
+
+    fn commit_action_branch_index(controller: &TuiController, name: &str) -> usize {
+        controller
+            .app()
+            .branches
+            .iter()
+            .filter(|branch| !branch.is_remote())
+            .position(|branch| branch.name == name)
+            .unwrap()
+    }
+
+    #[test]
+    fn compare_flow_resolves_target_and_scrolls_long_stat_output() {
+        let (temp, mut controller, _, target) = commit_action_linear_controller(32, 0);
+        let client = GitClient::from_path(temp.path());
+        let status_before = client.status().unwrap();
+
+        commit_action_open(&mut controller, 2);
+        for character in "HEAD~1".chars() {
+            commit_action_press(&mut controller, KeyCode::Char(character));
+        }
+        commit_action_press(&mut controller, KeyCode::Enter);
+        commit_action_wait(&mut controller);
+
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), target);
+        assert_eq!(client.status().unwrap(), status_before);
+        assert!(matches!(
+            controller.app().commit_action_flow,
+            Some(CommitActionFlow::CompareResult { .. })
+        ));
+        let first_page = commit_action_render(&mut controller, 70, 16);
+        assert!(first_page.contains("changed-00.txt"), "{first_page}");
+
+        for _ in 0..8 {
+            commit_action_press(&mut controller, KeyCode::PageDown);
+        }
+        let last_page = commit_action_render(&mut controller, 70, 16);
+        assert!(
+            last_page.contains("changed-31.txt"),
+            "comparison cannot scroll to its last changed path: {last_page}"
+        );
+    }
+
+    #[test]
+    fn cherry_pick_confirmation_can_be_cancelled_without_switching_branches() {
+        let (temp, mut controller, _, source) = commit_action_linear_controller(1, 0);
+        let client = GitClient::from_path(temp.path());
+
+        commit_action_open(&mut controller, 3);
+        let destination_index = commit_action_branch_index(&controller, "aaa-destination");
+        for _ in 0..destination_index {
+            commit_action_press(&mut controller, KeyCode::Char('j'));
+        }
+        commit_action_press(&mut controller, KeyCode::Enter);
+        let confirmation = commit_action_render(&mut controller, 90, 24);
+        assert!(confirmation.contains("Source commit:"), "{confirmation}");
+        assert!(
+            confirmation.contains("Destination local branch: aaa-destination"),
+            "{confirmation}"
+        );
+        assert!(confirmation.contains("clean"), "{confirmation}");
+
+        commit_action_press(&mut controller, KeyCode::Esc);
+
+        assert!(matches!(
+            controller.app().commit_action_flow,
+            Some(CommitActionFlow::CherryPickTarget { .. })
+        ));
+        assert_eq!(client.status().unwrap().branch_name, "main");
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), source);
+        assert!(controller.app().loading.is_none());
+    }
+
+    #[test]
+    fn cherry_pick_conflict_refreshes_destination_status_and_recovery_guidance() {
+        let (temp, base) = commit_action_init_repository();
+        commit_action_checked_git(temp.path(), &["branch", "destination", base.as_str()]);
+
+        fs::write(temp.path().join("tracked.txt"), "source edit\n").unwrap();
+        commit_action_checked_git(temp.path(), &["add", "tracked.txt"]);
+        commit_action_checked_git(temp.path(), &["commit", "--quiet", "-m", "source change"]);
+
+        commit_action_checked_git(temp.path(), &["switch", "--quiet", "destination"]);
+        fs::write(temp.path().join("tracked.txt"), "destination edit\n").unwrap();
+        commit_action_checked_git(temp.path(), &["add", "tracked.txt"]);
+        commit_action_checked_git(
+            temp.path(),
+            &["commit", "--quiet", "-m", "destination change"],
+        );
+        commit_action_checked_git(temp.path(), &["switch", "--quiet", "main"]);
+
+        let mut controller = TuiController::new(GitClient::from_path(temp.path()));
+        controller.refresh().unwrap();
+        commit_action_open(&mut controller, 3);
+        let destination_index = commit_action_branch_index(&controller, "destination");
+        for _ in 0..destination_index {
+            commit_action_press(&mut controller, KeyCode::Char('j'));
+        }
+        commit_action_press(&mut controller, KeyCode::Enter);
+        commit_action_press(&mut controller, KeyCode::Enter);
+        commit_action_wait(&mut controller);
+
+        let status = controller.app().status.as_ref().unwrap();
+        assert_eq!(status.branch_name, "destination");
+        assert!(
+            status.files.iter().any(|entry| entry.code.contains('U')),
+            "refreshed status does not expose the cherry-pick conflict: {status:?}"
+        );
+        assert!(controller.app().message.contains("cherry-pick --continue"));
+        assert!(controller.app().message.contains("--abort"));
+    }
+
+    #[test]
+    fn reset_defaults_to_soft_and_escape_cancels_without_mutation() {
+        let (temp, mut controller, base, target) = commit_action_linear_controller(1, 0);
+        let client = GitClient::from_path(temp.path());
+        controller.app_mut().select_view(View::Log);
+        commit_action_press(&mut controller, KeyCode::Char('j'));
+        commit_action_open(&mut controller, 4);
+
+        assert!(matches!(
+            controller.app().commit_action_flow,
+            Some(CommitActionFlow::ResetModePicker {
+                selected_index: 0,
+                ..
+            })
+        ));
+        let picker = commit_action_render(&mut controller, 90, 24);
+        assert!(picker.contains("Soft is the safest default"), "{picker}");
+        assert!(picker.contains("▶ Soft"), "{picker}");
+
+        commit_action_press(&mut controller, KeyCode::Enter);
+        assert!(matches!(
+            controller.app().commit_action_flow,
+            Some(CommitActionFlow::ResetConfirmation {
+                mode: ResetMode::Soft,
+                ..
+            })
+        ));
+        commit_action_press(&mut controller, KeyCode::Esc);
+        assert!(matches!(
+            controller.app().commit_action_flow,
+            Some(CommitActionFlow::ResetModePicker { .. })
+        ));
+        commit_action_press(&mut controller, KeyCode::Esc);
+
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), target);
+        assert_eq!(client.resolve_commit("main").unwrap(), target);
+        assert_eq!(client.resolve_commit(base.as_str()).unwrap(), base);
+        assert!(controller.app().loading.is_none());
+    }
+
+    #[test]
+    fn hard_reset_requires_y_and_scrolls_every_dirty_path_before_mutating() {
+        let (temp, mut controller, base, _) = commit_action_linear_controller(1, 28);
+        let client = GitClient::from_path(temp.path());
+        controller.app_mut().select_view(View::Log);
+        commit_action_press(&mut controller, KeyCode::Char('j'));
+        commit_action_open(&mut controller, 4);
+        commit_action_press(&mut controller, KeyCode::Char('j'));
+        commit_action_press(&mut controller, KeyCode::Char('j'));
+        commit_action_press(&mut controller, KeyCode::Enter);
+        commit_action_press(&mut controller, KeyCode::Enter);
+
+        assert!(matches!(
+            controller.app().commit_action_flow,
+            Some(CommitActionFlow::HardResetConfirmation { .. })
+        ));
+        let first_page = commit_action_render(&mut controller, 70, 14);
+        assert!(
+            first_page.contains("DESTRUCTIVE HARD RESET"),
+            "{first_page}"
+        );
+        assert!(
+            first_page.contains("y = confirm destructive reset"),
+            "hard reset confirmation control is hidden: {first_page}"
+        );
+
+        commit_action_press(&mut controller, KeyCode::PageDown);
+        let first_paths = commit_action_render(&mut controller, 70, 14);
+        assert!(
+            first_paths.contains("dirty-00.txt"),
+            "hard reset review cannot scroll to its first dirty path: {first_paths}"
+        );
+
+        for _ in 0..10 {
+            commit_action_press(&mut controller, KeyCode::PageDown);
+        }
+        let last_page = commit_action_render(&mut controller, 70, 14);
+        assert!(
+            last_page.contains("dirty-27.txt"),
+            "hard reset review cannot scroll to the final dirty path: {last_page}"
+        );
+
+        commit_action_press(&mut controller, KeyCode::Enter);
+        assert!(controller.app().loading.is_none());
+        assert_eq!(
+            client.resolve_commit("HEAD").unwrap(),
+            client.resolve_commit("main").unwrap()
+        );
+
+        commit_action_press(&mut controller, KeyCode::Char('y'));
+        commit_action_wait(&mut controller);
+
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), base);
+        assert_eq!(
+            fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(temp.path().join("dirty-27.txt").exists());
+    }
+
+    fn commit_action_open_reset(controller: &mut TuiController) {
+        controller.app_mut().select_view(View::Log);
+        commit_action_open(controller, 4);
+    }
+
+    #[test]
+    fn reset_is_refused_for_non_current_branch_detached_head_and_conflicts() {
+        let cases = [
+            (
+                "non-current",
+                "main",
+                Some("aaa-destination"),
+                None,
+                "current local branch",
+            ),
+            ("detached", "HEAD", Some("main"), None, "detached HEAD"),
+            ("conflicted", "main", Some("main"), Some("UU"), "conflicts"),
+        ];
+
+        for (case, branch_name, selected_branch, conflict_code, expected_message) in cases {
+            let (temp, mut controller, _, _) = commit_action_linear_controller(0, 0);
+            controller.app_mut().status.as_mut().unwrap().branch_name = branch_name.to_string();
+            controller.app_mut().selected_branch = selected_branch.map(str::to_string);
+            if let Some(code) = conflict_code {
+                controller
+                    .app_mut()
+                    .status
+                    .as_mut()
+                    .unwrap()
+                    .files
+                    .push(StatusEntry {
+                        code: code.to_string(),
+                        path: "conflict.txt".to_string(),
+                    });
+            }
+
+            commit_action_open_reset(&mut controller);
+
+            assert!(
+                matches!(
+                    controller.app().commit_action_flow,
+                    Some(CommitActionFlow::Menu {
+                        selected_index: 4,
+                        ..
+                    })
+                ),
+                "{case}: reset unexpectedly opened a mode picker"
+            );
+            assert!(
+                controller.app().message.contains(expected_message),
+                "{case}: {}",
+                controller.app().message
+            );
+            assert!(controller.app().loading.is_none());
+            drop(temp);
+        }
     }
 }

@@ -12,6 +12,7 @@ use crate::{
         build_branch_catalog, BranchHistory, BranchInfo, CommitSummary, GraphLine, RepoSnapshot,
         RepoStatus,
     },
+    git::{CommitComparison, ResetMode},
 };
 
 use super::{branching, layout, operations::CleanupReport, theme, widgets};
@@ -125,6 +126,9 @@ pub enum DeleteBranchTarget {
 pub enum CommitAction {
     CheckoutCommit,
     CreateBranchFromCommit,
+    CompareCommit,
+    CherryPickCommit,
+    ResetCurrentBranch,
 }
 
 impl CommitAction {
@@ -132,8 +136,61 @@ impl CommitAction {
         match self {
             CommitAction::CheckoutCommit => "checkout commit",
             CommitAction::CreateBranchFromCommit => "create branch from commit",
+            CommitAction::CompareCommit => "compare commit",
+            CommitAction::CherryPickCommit => "cherry-pick commit",
+            CommitAction::ResetCurrentBranch => "reset current branch",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResetReview {
+    pub target: String,
+    pub branch: String,
+    pub expected_head: String,
+    pub dirty_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommitActionFlow {
+    Menu {
+        source: String,
+        selected_index: usize,
+    },
+    CompareTarget {
+        source: String,
+        target: String,
+    },
+    CompareResult {
+        comparison: CommitComparison,
+        scroll_offset: usize,
+        scroll_page_size: usize,
+        scroll_max: usize,
+    },
+    CherryPickTarget {
+        source: String,
+        branches: Vec<String>,
+        selected_index: usize,
+    },
+    CherryPickConfirmation {
+        source: String,
+        destination: String,
+    },
+    ResetModePicker {
+        review: ResetReview,
+        selected_index: usize,
+    },
+    ResetConfirmation {
+        review: ResetReview,
+        mode: ResetMode,
+    },
+    HardResetConfirmation {
+        review: ResetReview,
+        mode: ResetMode,
+        scroll_offset: usize,
+        scroll_page_size: usize,
+        scroll_max: usize,
+    },
 }
 
 impl PickerAction {
@@ -168,6 +225,51 @@ impl DeleteBranchTarget {
     }
 }
 
+fn reset_mode_at(index: usize) -> Option<ResetMode> {
+    [ResetMode::Soft, ResetMode::Mixed, ResetMode::Hard]
+        .get(index)
+        .copied()
+}
+
+fn reset_mode_index(mode: ResetMode) -> usize {
+    match mode {
+        ResetMode::Soft => 0,
+        ResetMode::Mixed => 1,
+        ResetMode::Hard => 2,
+    }
+}
+
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(8).collect()
+}
+
+fn dirty_path_summary(paths: &[String]) -> String {
+    match paths.len() {
+        0 => String::from("clean"),
+        count => format!("{count} changed path(s)"),
+    }
+}
+
+fn move_index(current: usize, count: usize, delta: isize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let next = if delta.is_negative() {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        current.saturating_add(delta as usize)
+    };
+    next.min(count.saturating_sub(1))
+}
+
+fn move_scroll_offset(current: usize, maximum: usize, delta: isize) -> usize {
+    if delta.is_negative() {
+        current.saturating_sub(delta.unsigned_abs())
+    } else {
+        current.saturating_add(delta as usize).min(maximum)
+    }
+}
+
 pub struct App {
     pub(crate) view: View,
     pub(crate) status: Option<RepoStatus>,
@@ -182,8 +284,7 @@ pub struct App {
     pub(crate) picker_index: usize,
     pub(crate) remote_picker_open: bool,
     pub(crate) remote_picker_index: usize,
-    pub(crate) commit_actions_open: bool,
-    pub(crate) commit_action_index: usize,
+    pub(crate) commit_action_flow: Option<CommitActionFlow>,
     pub(crate) delete_branch_confirm_open: bool,
     pub(crate) delete_branch_target: Option<DeleteBranchTarget>,
     pub(crate) cleanup_modal_open: bool,
@@ -227,8 +328,7 @@ impl App {
             picker_index: 0,
             remote_picker_open: false,
             remote_picker_index: 0,
-            commit_actions_open: false,
-            commit_action_index: 0,
+            commit_action_flow: None,
             delete_branch_confirm_open: false,
             delete_branch_target: None,
             cleanup_modal_open: false,
@@ -423,7 +523,7 @@ impl App {
     }
 
     pub fn commit_actions_are_open(&self) -> bool {
-        self.commit_actions_open
+        self.commit_action_flow.is_some()
     }
 
     pub fn delete_branch_confirm_is_open(&self) -> bool {
@@ -740,12 +840,14 @@ impl App {
     }
 
     pub fn open_commit_actions(&mut self) {
-        if self.selected_commit().is_none() {
+        let Some(source) = self.selected_commit().map(|commit| commit.hash.clone()) else {
             self.set_feedback("No commit selected.", MessageKind::Warning);
             return;
-        }
-        self.commit_actions_open = true;
-        self.commit_action_index = 0;
+        };
+        self.commit_action_flow = Some(CommitActionFlow::Menu {
+            source,
+            selected_index: 0,
+        });
         self.set_feedback(
             "Choose an action for the selected commit.",
             MessageKind::Info,
@@ -753,7 +855,221 @@ impl App {
     }
 
     pub fn close_commit_actions(&mut self) {
-        self.commit_actions_open = false;
+        self.commit_action_flow = None;
+    }
+
+    pub(crate) fn selected_commit_action(&self) -> Option<(CommitAction, String)> {
+        let Some(CommitActionFlow::Menu {
+            source,
+            selected_index,
+        }) = self.commit_action_flow.as_ref()
+        else {
+            return None;
+        };
+        self.commit_actions()
+            .get(*selected_index)
+            .copied()
+            .map(|action| (action, source.clone()))
+    }
+
+    pub(crate) fn open_compare_target(&mut self, source: String) {
+        self.commit_action_flow = Some(CommitActionFlow::CompareTarget {
+            source,
+            target: String::new(),
+        });
+        self.set_feedback(
+            "Enter a commit or branch to compare with.",
+            MessageKind::Info,
+        );
+    }
+
+    pub(crate) fn compare_target_request(&self) -> Option<(String, String)> {
+        match self.commit_action_flow.as_ref()? {
+            CommitActionFlow::CompareTarget { source, target } if !target.trim().is_empty() => {
+                Some((source.clone(), target.trim().to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn type_compare_target_char(&mut self, character: char) {
+        if let Some(CommitActionFlow::CompareTarget { target, .. }) =
+            self.commit_action_flow.as_mut()
+        {
+            target.push(character);
+        }
+    }
+
+    pub(crate) fn delete_compare_target_char(&mut self) {
+        if let Some(CommitActionFlow::CompareTarget { target, .. }) =
+            self.commit_action_flow.as_mut()
+        {
+            target.pop();
+        }
+    }
+
+    pub(crate) fn show_commit_comparison(&mut self, comparison: CommitComparison) {
+        self.commit_action_flow = Some(CommitActionFlow::CompareResult {
+            comparison,
+            scroll_offset: 0,
+            scroll_page_size: 1,
+            scroll_max: 0,
+        });
+    }
+
+    pub(crate) fn open_cherry_pick_target(&mut self, source: String) {
+        let branches = self
+            .branches
+            .iter()
+            .filter(|branch| !branch.is_remote())
+            .map(|branch| branch.name.clone())
+            .collect::<Vec<_>>();
+        if branches.is_empty() {
+            self.set_feedback(
+                "No local branch is available as a cherry-pick destination.",
+                MessageKind::Warning,
+            );
+            return;
+        }
+        self.commit_action_flow = Some(CommitActionFlow::CherryPickTarget {
+            source,
+            branches,
+            selected_index: 0,
+        });
+    }
+
+    pub(crate) fn open_cherry_pick_confirmation(&mut self) -> bool {
+        let Some(CommitActionFlow::CherryPickTarget {
+            source,
+            branches,
+            selected_index,
+        }) = self.commit_action_flow.as_ref()
+        else {
+            return false;
+        };
+        let Some(destination) = branches.get(*selected_index).cloned() else {
+            return false;
+        };
+        self.commit_action_flow = Some(CommitActionFlow::CherryPickConfirmation {
+            source: source.clone(),
+            destination,
+        });
+        true
+    }
+
+    pub(crate) fn cherry_pick_request(&self) -> Option<(String, String)> {
+        match self.commit_action_flow.as_ref()? {
+            CommitActionFlow::CherryPickConfirmation {
+                source,
+                destination,
+            } => Some((source.clone(), destination.clone())),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn open_reset_mode_picker(&mut self, review: ResetReview) {
+        self.commit_action_flow = Some(CommitActionFlow::ResetModePicker {
+            review,
+            selected_index: 0,
+        });
+    }
+
+    pub(crate) fn open_reset_confirmation(&mut self) -> bool {
+        let Some(CommitActionFlow::ResetModePicker {
+            review,
+            selected_index,
+        }) = self.commit_action_flow.as_ref()
+        else {
+            return false;
+        };
+        let Some(mode) = reset_mode_at(*selected_index) else {
+            return false;
+        };
+        self.commit_action_flow = Some(CommitActionFlow::ResetConfirmation {
+            review: review.clone(),
+            mode,
+        });
+        true
+    }
+
+    pub(crate) fn reset_request(&self) -> Option<(String, ResetMode, String, String)> {
+        match self.commit_action_flow.as_ref()? {
+            CommitActionFlow::ResetConfirmation { review, mode }
+            | CommitActionFlow::HardResetConfirmation { review, mode, .. } => Some((
+                review.target.clone(),
+                *mode,
+                review.branch.clone(),
+                review.expected_head.clone(),
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn open_hard_reset_confirmation(&mut self) -> bool {
+        let Some(CommitActionFlow::ResetConfirmation { review, mode }) =
+            self.commit_action_flow.as_ref()
+        else {
+            return false;
+        };
+        if *mode != ResetMode::Hard {
+            return false;
+        }
+        self.commit_action_flow = Some(CommitActionFlow::HardResetConfirmation {
+            review: review.clone(),
+            mode: *mode,
+            scroll_offset: 0,
+            scroll_page_size: 1,
+            scroll_max: 0,
+        });
+        true
+    }
+
+    pub(crate) fn back_to_reset_confirmation(&mut self) {
+        if let Some(CommitActionFlow::HardResetConfirmation { review, mode, .. }) =
+            self.commit_action_flow.as_ref()
+        {
+            self.commit_action_flow = Some(CommitActionFlow::ResetConfirmation {
+                review: review.clone(),
+                mode: *mode,
+            });
+        }
+    }
+
+    pub(crate) fn back_to_reset_mode_picker(&mut self) {
+        match self.commit_action_flow.as_ref() {
+            Some(CommitActionFlow::ResetConfirmation { review, mode })
+            | Some(CommitActionFlow::HardResetConfirmation { review, mode, .. }) => {
+                self.commit_action_flow = Some(CommitActionFlow::ResetModePicker {
+                    review: review.clone(),
+                    selected_index: reset_mode_index(*mode),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn back_to_cherry_pick_targets(&mut self) {
+        if let Some(CommitActionFlow::CherryPickConfirmation {
+            source,
+            destination,
+        }) = self.commit_action_flow.as_ref()
+        {
+            let branches = self
+                .branches
+                .iter()
+                .filter(|branch| !branch.is_remote())
+                .map(|branch| branch.name.clone())
+                .collect::<Vec<_>>();
+            let selected_index = branches
+                .iter()
+                .position(|branch| branch == destination)
+                .unwrap_or(0);
+            self.commit_action_flow = Some(CommitActionFlow::CherryPickTarget {
+                source: source.clone(),
+                branches,
+                selected_index,
+            });
+        }
     }
 
     pub fn open_delete_branch_confirm(&mut self, target: DeleteBranchTarget) {
@@ -874,23 +1190,121 @@ impl App {
 
     pub fn move_commit_action(&mut self, delta: isize) {
         let count = self.commit_actions().len();
-        if count == 0 {
+        let Some(CommitActionFlow::Menu { selected_index, .. }) = self.commit_action_flow.as_mut()
+        else {
             return;
-        }
-
-        let next = if delta.is_negative() {
-            self.commit_action_index
-                .saturating_sub(delta.unsigned_abs())
-        } else {
-            self.commit_action_index.saturating_add(delta as usize)
         };
-        self.commit_action_index = next.min(count.saturating_sub(1));
+        *selected_index = if delta.is_negative() {
+            selected_index.saturating_sub(delta.unsigned_abs())
+        } else {
+            selected_index.saturating_add(delta as usize)
+        }
+        .min(count.saturating_sub(1));
+    }
+
+    pub(crate) fn move_cherry_pick_target(&mut self, delta: isize) {
+        if let Some(CommitActionFlow::CherryPickTarget {
+            branches,
+            selected_index,
+            ..
+        }) = self.commit_action_flow.as_mut()
+        {
+            *selected_index = move_index(*selected_index, branches.len(), delta);
+        }
+    }
+
+    pub(crate) fn move_reset_mode(&mut self, delta: isize) {
+        if let Some(CommitActionFlow::ResetModePicker { selected_index, .. }) =
+            self.commit_action_flow.as_mut()
+        {
+            *selected_index = move_index(*selected_index, 3, delta);
+        }
+    }
+
+    pub(crate) fn back_to_commit_action_menu(&mut self) {
+        let source = match self.commit_action_flow.as_ref() {
+            Some(CommitActionFlow::Menu { .. }) | None => return,
+            Some(CommitActionFlow::CompareTarget { source, .. })
+            | Some(CommitActionFlow::CherryPickTarget { source, .. })
+            | Some(CommitActionFlow::CherryPickConfirmation { source, .. }) => source.clone(),
+            Some(CommitActionFlow::CompareResult { comparison, .. }) => comparison.left_oid.clone(),
+            Some(CommitActionFlow::ResetModePicker { review, .. })
+            | Some(CommitActionFlow::ResetConfirmation { review, .. })
+            | Some(CommitActionFlow::HardResetConfirmation { review, .. }) => review.target.clone(),
+        };
+        self.commit_action_flow = Some(CommitActionFlow::Menu {
+            source,
+            selected_index: 0,
+        });
+    }
+
+    pub(crate) fn move_commit_action_scroll(&mut self, delta: isize) {
+        let maximum = self.commit_action_scroll_max();
+        if let Some(offset) = self.commit_action_scroll_offset_mut() {
+            *offset = move_scroll_offset(*offset, maximum, delta);
+        }
+    }
+
+    pub(crate) fn move_commit_action_scroll_page(&mut self, direction: isize) {
+        let page = match self.commit_action_flow.as_ref() {
+            Some(CommitActionFlow::CompareResult {
+                scroll_page_size, ..
+            })
+            | Some(CommitActionFlow::HardResetConfirmation {
+                scroll_page_size, ..
+            }) => *scroll_page_size,
+            _ => 1,
+        }
+        .max(1);
+        let delta = page.min(isize::MAX as usize) as isize * direction.signum();
+        self.move_commit_action_scroll(delta);
+    }
+
+    fn commit_action_scroll_offset_mut(&mut self) -> Option<&mut usize> {
+        match self.commit_action_flow.as_mut()? {
+            CommitActionFlow::CompareResult { scroll_offset, .. }
+            | CommitActionFlow::HardResetConfirmation { scroll_offset, .. } => Some(scroll_offset),
+            _ => None,
+        }
+    }
+
+    fn commit_action_scroll_max(&self) -> usize {
+        match self.commit_action_flow.as_ref() {
+            Some(CommitActionFlow::CompareResult { scroll_max, .. })
+            | Some(CommitActionFlow::HardResetConfirmation { scroll_max, .. }) => *scroll_max,
+            _ => 0,
+        }
+    }
+
+    fn set_commit_action_scroll_metrics(&mut self, page_size: usize, max_scroll: usize) {
+        match self.commit_action_flow.as_mut() {
+            Some(CommitActionFlow::CompareResult {
+                scroll_offset,
+                scroll_page_size,
+                scroll_max,
+                ..
+            })
+            | Some(CommitActionFlow::HardResetConfirmation {
+                scroll_offset,
+                scroll_page_size,
+                scroll_max,
+                ..
+            }) => {
+                *scroll_page_size = page_size.max(1);
+                *scroll_max = max_scroll;
+                *scroll_offset = (*scroll_offset).min(max_scroll);
+            }
+            _ => {}
+        }
     }
 
     pub fn commit_actions(&self) -> &'static [CommitAction] {
         const ACTIONS: &[CommitAction] = &[
             CommitAction::CheckoutCommit,
             CommitAction::CreateBranchFromCommit,
+            CommitAction::CompareCommit,
+            CommitAction::CherryPickCommit,
+            CommitAction::ResetCurrentBranch,
         ];
         ACTIONS
     }
@@ -1009,11 +1423,10 @@ impl App {
             frame.render_widget(Clear, area);
             frame.render_widget(popup, area);
         }
-        if self.commit_actions_open {
-            let popup = self.render_commit_actions();
-            let area = layout::centered_rect(60, 50, frame.area());
+        if self.commit_action_flow.is_some() {
+            let area = layout::centered_rect(82, 74, frame.area());
             frame.render_widget(Clear, area);
-            frame.render_widget(popup, area);
+            self.render_commit_action_flow(frame, area);
         }
         if self.delete_branch_confirm_is_open() {
             let popup = self.render_delete_branch_confirm();
@@ -1603,40 +2016,199 @@ impl App {
         )
     }
 
-    fn render_commit_actions(&self) -> Paragraph<'_> {
-        let commit = self
-            .selected_commit()
-            .map(|commit| {
-                let short_hash = commit.hash.chars().take(8).collect::<String>();
-                format!("{short_hash} {}", commit.subject)
-            })
-            .unwrap_or_else(|| String::from("unknown commit"));
-        let options = self
-            .commit_actions()
-            .iter()
-            .enumerate()
-            .map(|(index, action)| {
-                let prefix = if index == self.commit_action_index {
-                    "▶"
-                } else {
-                    " "
-                };
-                format!("{prefix} {}", action.label())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+    fn render_commit_action_flow(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let Some((title, content)) = self.commit_action_flow_content() else {
+            return;
+        };
+        let is_comparison = matches!(
+            self.commit_action_flow,
+            Some(CommitActionFlow::CompareResult { .. })
+        );
+        let is_hard_reset = matches!(
+            self.commit_action_flow,
+            Some(CommitActionFlow::HardResetConfirmation { .. })
+        );
+        let block = Block::default()
+            .title(title)
+            .title_style(theme::panel_title_style(true, theme::PURPLE))
+            .borders(Borders::ALL)
+            .border_style(theme::panel_border_style(true, theme::PURPLE));
+        let inner = block.inner(area);
 
-        Paragraph::new(format!(
-            "Commit: {commit}\n\n{options}\n\nEnter = confirm • Esc = close"
-        ))
-        .style(theme::panel_surface_style(true))
-        .block(
-            Block::default()
-                .title("Commit Actions")
-                .title_style(theme::panel_title_style(true, theme::PURPLE))
-                .borders(Borders::ALL)
-                .border_style(theme::panel_border_style(true, theme::PURPLE)),
-        )
+        if is_comparison || is_hard_reset {
+            frame.render_widget(block, area);
+            let [content_area, controls_area] =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+            let wrapped_lines = content.lines().map(Line::from).collect::<Vec<_>>();
+            let total_lines = cleanup_wrapped_height(&wrapped_lines, content_area.width as usize);
+            let max_scroll = total_lines.saturating_sub(content_area.height as usize);
+            self.set_commit_action_scroll_metrics(content_area.height as usize, max_scroll);
+            let scroll_offset = match self.commit_action_flow.as_ref() {
+                Some(CommitActionFlow::CompareResult { scroll_offset, .. })
+                | Some(CommitActionFlow::HardResetConfirmation { scroll_offset, .. }) => {
+                    *scroll_offset
+                }
+                _ => 0,
+            };
+            frame.render_widget(
+                Paragraph::new(content)
+                    .wrap(Wrap { trim: false })
+                    .scroll((scroll_offset as u16, 0))
+                    .style(theme::panel_surface_style(true)),
+                content_area,
+            );
+            let controls = if is_hard_reset {
+                "y = confirm destructive reset • Esc = back • j/k or PgUp/PgDn scroll"
+            } else {
+                "j/k or arrows scroll • PgUp/PgDn page • Enter/Esc = back"
+            };
+            frame.render_widget(
+                Paragraph::new(controls)
+                    .alignment(Alignment::Center)
+                    .style(theme::panel_surface_style(true)),
+                controls_area,
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(content)
+                    .style(theme::panel_surface_style(true))
+                    .block(block),
+                area,
+            );
+        }
+    }
+
+    fn commit_action_flow_content(&self) -> Option<(String, String)> {
+        let flow = self.commit_action_flow.as_ref()?;
+        let content = match flow {
+            CommitActionFlow::Menu {
+                source,
+                selected_index,
+            } => {
+                let commit = self
+                    .log
+                    .iter()
+                    .find(|commit| commit.hash == *source)
+                    .map(|commit| {
+                        format!("{} {}", short_oid(source), commit.subject)
+                    })
+                    .unwrap_or_else(|| short_oid(source));
+                let options = self
+                    .commit_actions()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, action)| {
+                        let prefix = if index == *selected_index { "▶" } else { " " };
+                        format!("{prefix} {}", action.label())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Commit: {commit}\n\n{options}\n\nEnter = confirm • Esc = close")
+            }
+            CommitActionFlow::CompareTarget { source, target } => format!(
+                "Selected commit: {}\nCompare against commit or branch:\n{}\n\nEnter = compare • Esc = back • Backspace = edit",
+                short_oid(source),
+                if target.is_empty() { "<type a reference>" } else { target }
+            ),
+            CommitActionFlow::CompareResult { comparison, .. } => format!(
+                "From: {}\nTo: {}\n\n{}",
+                short_oid(&comparison.left_oid),
+                short_oid(&comparison.right_oid),
+                comparison.summary
+            ),
+            CommitActionFlow::CherryPickTarget {
+                source,
+                branches,
+                selected_index,
+            } => {
+                let options = branches
+                    .iter()
+                    .enumerate()
+                    .map(|(index, branch)| {
+                        let prefix = if index == *selected_index { "▶" } else { " " };
+                        format!("{prefix} {branch}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Source commit: {}\nChoose a local destination branch:\n\n{}\n\nj/k or arrows move • Enter = review • Esc = back",
+                    short_oid(source),
+                    if options.is_empty() { "No local branches" } else { &options }
+                )
+            }
+            CommitActionFlow::CherryPickConfirmation {
+                source,
+                destination,
+            } => format!(
+                "Source commit: {}\nDestination local branch: {destination}\n\nGitRex will switch to this branch if needed, then apply the commit. The index and worktree, including untracked files, must be clean. A conflict stays in progress on the destination; resolve it and run git cherry-pick --continue or --abort.\n\nEnter = cherry-pick • Esc = back",
+                short_oid(source)
+            ),
+            CommitActionFlow::ResetModePicker {
+                review,
+                selected_index,
+            } => {
+                let options = [ResetMode::Soft, ResetMode::Mixed, ResetMode::Hard]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, mode)| {
+                        let prefix = if index == *selected_index { "▶" } else { " " };
+                        format!("{prefix} {} — {}", mode.label(), mode.effect())
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Current local branch: {}\nTarget commit: {}\n\nChoose a reset mode (Soft is the safest default):\n{}\n\nj/k or arrows move • Enter = review • Esc = back",
+                    review.branch,
+                    short_oid(&review.target),
+                    options
+                )
+            }
+            CommitActionFlow::ResetConfirmation { review, mode } => format!(
+                "Current local branch: {}\nTarget commit: {}\nMode: {}\nEffect: {}\n\nWorking tree: {}\n\n{}",
+                review.branch,
+                short_oid(&review.target),
+                mode.label(),
+                mode.effect(),
+                dirty_path_summary(&review.dirty_paths),
+                if *mode == ResetMode::Hard {
+                    "Enter = continue to destructive review • Esc = back"
+                } else {
+                    "Enter = reset • Esc = back"
+                }
+            ),
+            CommitActionFlow::HardResetConfirmation { review, mode, .. } => {
+                let dirty_paths = if review.dirty_paths.is_empty() {
+                    String::from("- none")
+                } else {
+                    review
+                        .dirty_paths
+                        .iter()
+                        .map(|path| format!("- {path}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                format!(
+                    "Branch: {}\nTarget: {}\nMode: {}\nEffect: {}\nChanged paths ({}):\n{}",
+                    review.branch,
+                    short_oid(&review.target),
+                    mode.label(),
+                    mode.effect(),
+                    review.dirty_paths.len(),
+                    dirty_paths
+                )
+            }
+        };
+        let title = match flow {
+            CommitActionFlow::Menu { .. } => "Commit Actions",
+            CommitActionFlow::CompareTarget { .. } => "Compare Commit",
+            CommitActionFlow::CompareResult { .. } => "Commit Comparison",
+            CommitActionFlow::CherryPickTarget { .. } => "Cherry-pick Destination",
+            CommitActionFlow::CherryPickConfirmation { .. } => "Confirm Cherry-pick",
+            CommitActionFlow::ResetModePicker { .. } => "Reset Mode",
+            CommitActionFlow::ResetConfirmation { .. } => "Confirm Reset",
+            CommitActionFlow::HardResetConfirmation { .. } => "DESTRUCTIVE HARD RESET",
+        };
+        Some((title.to_string(), content))
     }
 
     fn render_delete_branch_confirm(&self) -> Paragraph<'_> {
@@ -2724,7 +3296,7 @@ mod tests {
         app.open_remote_picker();
         assert!(!app.remote_picker_open);
         app.open_commit_actions();
-        assert!(!app.commit_actions_open);
+        assert!(app.commit_action_flow.is_none());
         app.open_branch_creator();
         assert!(!app.branch_create_open);
 

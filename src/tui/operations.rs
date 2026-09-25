@@ -6,11 +6,25 @@ use crate::{
         branch::{BranchCleanupOutcome, BranchCleanupState},
         RepoSnapshot,
     },
-    git::GitClient,
+    git::{CherryPickStatus, CommitComparison, GitClient, ResetMode, ResetStatus},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationRequest {
+    CompareCommits {
+        left_reference: String,
+        right_reference: String,
+    },
+    CherryPick {
+        source: String,
+        destination: String,
+    },
+    Reset {
+        target: String,
+        mode: ResetMode,
+        expected_branch: String,
+        expected_head: String,
+    },
     Checkout {
         branch: String,
     },
@@ -48,6 +62,20 @@ pub enum OperationRequest {
 impl OperationRequest {
     pub fn loading_label(&self) -> String {
         match self {
+            OperationRequest::CompareCommits {
+                left_reference,
+                right_reference,
+            } => format!("Comparing {left_reference} with {right_reference}"),
+            OperationRequest::CherryPick {
+                source,
+                destination,
+            } => format!("Cherry-picking {source} onto {destination}"),
+            OperationRequest::Reset {
+                target,
+                mode,
+                expected_branch,
+                ..
+            } => format!("Resetting {expected_branch} to {target} ({})", mode.label()),
             OperationRequest::Checkout { branch } => format!("Checking out {branch}"),
             OperationRequest::CheckoutDetached { target } => {
                 format!("Checking out detached HEAD at {target}")
@@ -80,6 +108,17 @@ impl OperationRequest {
 
     pub fn success_label(&self) -> String {
         match self {
+            OperationRequest::CompareCommits { .. } => String::from("Comparison complete"),
+            OperationRequest::CherryPick {
+                source,
+                destination,
+            } => format!("Cherry-picked {source} onto {destination}"),
+            OperationRequest::Reset {
+                target,
+                mode,
+                expected_branch,
+                ..
+            } => format!("Reset {expected_branch} to {target} ({})", mode.label()),
             OperationRequest::Checkout { branch } => format!("Checked out {branch}"),
             OperationRequest::CheckoutDetached { target } => {
                 format!("Checked out detached HEAD at {target}")
@@ -118,6 +157,7 @@ impl OperationRequest {
 
 #[derive(Debug)]
 pub enum OperationOutcome {
+    Comparison(CommitComparison),
     Success {
         snapshot: RepoSnapshot,
         message: String,
@@ -127,6 +167,11 @@ pub enum OperationOutcome {
         warning: String,
     },
     Error(String),
+    StateChangedFailure {
+        snapshot: Option<RepoSnapshot>,
+        message: String,
+        refresh_warning: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +230,27 @@ impl GitOperationRunner {
 fn execute_operation(client: GitClient, request: OperationRequest) -> OperationOutcome {
     let success_message = request.success_label();
     let result = match request {
+        OperationRequest::CompareCommits {
+            left_reference,
+            right_reference,
+        } => {
+            return match client.compare_commits(&left_reference, &right_reference) {
+                Ok(comparison) => OperationOutcome::Comparison(comparison),
+                Err(error) => OperationOutcome::Error(error.to_string()),
+            };
+        }
+        OperationRequest::CherryPick {
+            source,
+            destination,
+        } => return execute_cherry_pick(client, source, destination),
+        OperationRequest::Reset {
+            target,
+            mode,
+            expected_branch,
+            expected_head,
+        } => {
+            return execute_reset(client, target, mode, expected_branch, expected_head);
+        }
         OperationRequest::CleanupLocalBranches { branches, base } => {
             return execute_cleanup(client, branches, base);
         }
@@ -230,6 +296,106 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
         },
         Err(error) => OperationOutcome::Error(error.to_string()),
     }
+}
+
+fn execute_cherry_pick(client: GitClient, source: String, destination: String) -> OperationOutcome {
+    let result = match client.cherry_pick_to_branch(&source, &destination) {
+        Ok(result) => result,
+        Err(error) => return OperationOutcome::Error(error.to_string()),
+    };
+    match result.status {
+        CherryPickStatus::Applied => {
+            let message = format!(
+                "Cherry-picked {} onto local branch {destination}",
+                short_oid(&result.source_oid)
+            );
+            match client.snapshot() {
+                Ok(snapshot) => OperationOutcome::Success { snapshot, message },
+                Err(error) => OperationOutcome::SuccessWithRefreshWarning {
+                    message,
+                    warning: format!("Repository view refresh failed: {error}"),
+                },
+            }
+        }
+        CherryPickStatus::Conflict => state_changed_failure(
+            &client,
+            format!(
+                "Cherry-pick conflict on local branch {destination} for {}. Resolve conflicts, then run `git cherry-pick --continue` or `git cherry-pick --abort`. {}",
+                short_oid(&result.source_oid),
+                result.detail
+            ),
+        ),
+        CherryPickStatus::Failed => state_changed_failure(
+            &client,
+            format!(
+                "Cherry-pick attempt failed on local branch {destination} for {}. Inspect the repository state before continuing. {}",
+                short_oid(&result.source_oid),
+                result.detail
+            ),
+        ),
+    }
+}
+
+fn execute_reset(
+    client: GitClient,
+    target: String,
+    mode: ResetMode,
+    expected_branch: String,
+    expected_head: String,
+) -> OperationOutcome {
+    let result = match client.reset_to_commit(&target, mode, &expected_branch, &expected_head) {
+        Ok(result) => result,
+        Err(error) => return OperationOutcome::Error(error.to_string()),
+    };
+
+    let resulting_head = result
+        .resulting_head
+        .as_deref()
+        .unwrap_or(result.target_oid.as_str());
+    if result.status == ResetStatus::Applied {
+        let message = format!(
+            "Reset local branch {expected_branch} ({}) from {} to {}",
+            mode.label(),
+            short_oid(&result.previous_head),
+            short_oid(resulting_head)
+        );
+        match client.snapshot() {
+            Ok(snapshot) => OperationOutcome::Success { snapshot, message },
+            Err(error) => OperationOutcome::SuccessWithRefreshWarning {
+                message,
+                warning: format!("Repository view refresh failed: {error}"),
+            },
+        }
+    } else {
+        state_changed_failure(
+            &client,
+            format!(
+                "Reset attempt failed for local branch {expected_branch} ({}) at target {}. {}",
+                mode.label(),
+                short_oid(&result.target_oid),
+                result.detail
+            ),
+        )
+    }
+}
+
+fn state_changed_failure(client: &GitClient, message: String) -> OperationOutcome {
+    match client.snapshot() {
+        Ok(snapshot) => OperationOutcome::StateChangedFailure {
+            snapshot: Some(snapshot),
+            message,
+            refresh_warning: None,
+        },
+        Err(error) => OperationOutcome::StateChangedFailure {
+            snapshot: None,
+            message,
+            refresh_warning: Some(format!("Repository view refresh failed: {error}")),
+        },
+    }
+}
+
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(8).collect()
 }
 
 fn execute_cleanup(client: GitClient, branches: Vec<String>, base: String) -> OperationOutcome {

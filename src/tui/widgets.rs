@@ -197,6 +197,25 @@ pub fn help_lines(
         ),
         example("press 2 for the full graph workspace; details follow the selected commit."),
         Line::from(""),
+        section("Commit actions"),
+        bullet(
+            "compare",
+            theme::PURPLE,
+            "enter a commit or branch; review the read-only diff stat with j/k or PgUp/PgDn",
+        ),
+        bullet(
+            "cherry-pick",
+            theme::SUCCESS,
+            "choose and review a local destination; the index and worktree, including untracked files, must be clean",
+        ),
+        example("the destination stays active after an attempt; resolve conflicts, then continue or abort with Git."),
+        bullet(
+            "reset",
+            theme::WARNING,
+            "current local graph branch only; Soft is the default and moves the tip only, Mixed resets the index and keeps files, Hard overwrites tracked paths",
+        ),
+        example("each reset needs review; Hard may overwrite obstructing untracked paths and requires a separate destructive y confirmation with scrollable changed paths."),
+        Line::from(""),
         section("Cleanup modal"),
         bullet(
             "space",
@@ -278,6 +297,23 @@ mod tests {
         assert!(copy.contains("origin/feature/login"));
         assert!(copy.contains("example:"));
         assert!(!copy.contains("Close help with h or Esc."));
+    }
+
+    #[test]
+    fn help_lines_describe_commit_action_safety_and_recovery() {
+        let copy = flatten(help_lines(None, None, BranchPanel::Local));
+
+        assert!(copy.contains("Commit actions"));
+        assert!(copy.contains("read-only diff stat"));
+        assert!(copy.contains("local destination"));
+        assert!(copy.contains("including untracked files"));
+        assert!(copy.contains("destination stays active"));
+        assert!(copy.contains("continue or abort"));
+        assert!(copy.contains("Soft is the default"));
+        assert!(copy.contains("current local graph branch only"));
+        assert!(copy.contains("Mixed resets the index and keeps files"));
+        assert!(copy.contains("overwrite obstructing untracked paths"));
+        assert!(copy.contains("destructive y confirmation"));
     }
 
     #[test]

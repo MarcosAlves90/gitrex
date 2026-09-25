@@ -10,6 +10,79 @@ use crate::domain::{
     BranchInfo,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitComparison {
+    pub left_oid: String,
+    pub right_oid: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CherryPickStatus {
+    Applied,
+    Conflict,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CherryPickResult {
+    pub source_oid: String,
+    pub destination: String,
+    pub status: CherryPickStatus,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    Soft,
+    Mixed,
+    Hard,
+}
+
+impl ResetMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Soft => "Soft",
+            Self::Mixed => "Mixed",
+            Self::Hard => "Hard",
+        }
+    }
+
+    pub fn effect(self) -> &'static str {
+        match self {
+            Self::Soft => "Move the branch tip; keep the index and worktree unchanged.",
+            Self::Mixed => "Move the branch tip and reset the index; keep worktree files.",
+            Self::Hard => {
+                "Move the branch tip; overwrite tracked index/worktree files and obstructing untracked paths."
+            }
+        }
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Soft => "--soft",
+            Self::Mixed => "--mixed",
+            Self::Hard => "--hard",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetStatus {
+    Applied,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetResult {
+    pub mode: ResetMode,
+    pub status: ResetStatus,
+    pub previous_head: String,
+    pub resulting_head: Option<String>,
+    pub target_oid: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct GitClient {
     discovery_path: PathBuf,
@@ -70,6 +143,187 @@ impl GitClient {
             )));
         }
         Ok(oid.to_string())
+    }
+
+    pub fn compare_commits(
+        &self,
+        left_reference: &str,
+        right_reference: &str,
+    ) -> Result<CommitComparison> {
+        let left_oid = self.resolve_commit(left_reference)?;
+        let right_oid = self.resolve_commit(right_reference)?;
+        let summary = if left_oid == right_oid {
+            String::from("No changes between these commits.")
+        } else {
+            let git = self.git();
+            git.run_text([
+                "diff",
+                // Keep comparison output finite while leaving enough room for
+                // the TUI's scrollable review to expose long but ordinary diffs.
+                "--stat=100,60,250",
+                "--no-ext-diff",
+                "--no-color",
+                left_oid.as_str(),
+                right_oid.as_str(),
+                "--",
+            ])?
+            .trim()
+            .to_string()
+        };
+
+        Ok(CommitComparison {
+            left_oid,
+            right_oid,
+            summary: if summary.is_empty() {
+                String::from("No changes between these commits.")
+            } else {
+                summary
+            },
+        })
+    }
+
+    pub fn cherry_pick_to_branch(
+        &self,
+        source_reference: &str,
+        destination: &str,
+    ) -> Result<CherryPickResult> {
+        let source_oid = self.resolve_commit(source_reference)?;
+        let git = self.git();
+        git.ensure_repository()?;
+
+        let destination_ref = format!("refs/heads/{destination}");
+        let branch = git.probe(["show-ref", "--verify", "--quiet", destination_ref.as_str()])?;
+        if !branch.success() {
+            return Err(GitError::ReferenceNotFound(destination.to_string()));
+        }
+
+        let dirty = git.run_text(["status", "--porcelain=v1", "--untracked-files=all"])?;
+        if !dirty.trim().is_empty() {
+            return Err(GitError::Backend(
+                "cherry-pick requires a clean index and worktree".to_string(),
+            ));
+        }
+
+        if let Err(error) = self.switch(destination) {
+            return Ok(CherryPickResult {
+                source_oid,
+                destination: destination.to_string(),
+                status: CherryPickStatus::Failed,
+                detail: format!("could not switch to destination branch: {error}"),
+            });
+        }
+        let output = match git.probe(["cherry-pick", source_oid.as_str()]) {
+            Ok(output) => output,
+            Err(error) => {
+                return Ok(CherryPickResult {
+                    source_oid,
+                    destination: destination.to_string(),
+                    status: CherryPickStatus::Failed,
+                    detail: format!(
+                        "could not start cherry-pick after switching branches: {error}"
+                    ),
+                });
+            }
+        };
+        if output.success() {
+            return Ok(CherryPickResult {
+                source_oid,
+                destination: destination.to_string(),
+                status: CherryPickStatus::Applied,
+                detail: String::from("Cherry-pick completed."),
+            });
+        }
+
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let in_progress = match git.probe(["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"])
+        {
+            Ok(result) => result.success(),
+            Err(error) => {
+                return Ok(CherryPickResult {
+                    source_oid,
+                    destination: destination.to_string(),
+                    status: CherryPickStatus::Failed,
+                    detail: format!(
+                        "{detail}; unable to determine whether cherry-pick is still in progress: {error}"
+                    ),
+                });
+            }
+        };
+        Ok(CherryPickResult {
+            source_oid,
+            destination: destination.to_string(),
+            status: if in_progress {
+                CherryPickStatus::Conflict
+            } else {
+                CherryPickStatus::Failed
+            },
+            detail: if detail.is_empty() {
+                format!("git cherry-pick failed with exit {:?}", output.exit_code)
+            } else {
+                detail
+            },
+        })
+    }
+
+    pub fn reset_to_commit(
+        &self,
+        target_reference: &str,
+        mode: ResetMode,
+        expected_branch: &str,
+        expected_head: &str,
+    ) -> Result<ResetResult> {
+        let git = self.git();
+        git.ensure_repository()?;
+        let target_oid = self.resolve_commit(target_reference)?;
+
+        let unresolved = git.run_text(["ls-files", "--unmerged"])?;
+        if !unresolved.trim().is_empty() {
+            return Err(GitError::Backend(
+                "reset is blocked while unresolved conflicts exist".to_string(),
+            ));
+        }
+
+        let symbolic_head = git.probe(["symbolic-ref", "--quiet", "HEAD"])?;
+        if !symbolic_head.success() {
+            return Err(GitError::Backend(
+                "reset requires a checked-out local branch".to_string(),
+            ));
+        }
+        let symbolic_head = String::from_utf8(symbolic_head.stdout).map_err(|_| GitError::Utf8)?;
+        let current_branch = symbolic_head
+            .trim()
+            .strip_prefix("refs/heads/")
+            .ok_or_else(|| {
+                GitError::Backend("reset requires a checked-out local branch".to_string())
+            })?;
+        if current_branch != expected_branch {
+            return Err(GitError::Backend(format!(
+                "current branch changed: expected {expected_branch}, found {current_branch}"
+            )));
+        }
+
+        let previous_head = self.resolve_commit("HEAD")?;
+        if previous_head != expected_head {
+            return Err(GitError::Backend(format!(
+                "HEAD changed: expected {expected_head}, found {previous_head}"
+            )));
+        }
+
+        let output = git.probe(["reset", mode.flag(), target_oid.as_str()])?;
+        let resulting_head = self.resolve_commit("HEAD").ok();
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Ok(ResetResult {
+            mode,
+            status: if output.success() {
+                ResetStatus::Applied
+            } else {
+                ResetStatus::Failed
+            },
+            previous_head,
+            resulting_head,
+            target_oid,
+            detail,
+        })
     }
 
     pub fn status(&self) -> Result<crate::domain::RepoStatus> {
@@ -391,12 +645,51 @@ fn default_clone_path(repository: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_clone_path, GitClient};
+    use super::{default_clone_path, GitClient, ResetMode};
     use crate::test_support::{
         checkout_branch, clone_bare_repo, clone_repo, commit_all, configure_user, create_branch,
         current_dir_lock, init_repo, push_branch, set_remote_head, set_upstream, write_file,
         CurrentDirGuard,
     };
+    use std::{path::Path, process::Command};
+
+    fn git_output(repository: &Path, arguments: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args(arguments)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap()
+    }
+
+    fn checked_git(repository: &Path, arguments: &[&str]) {
+        let output = git_output(repository, arguments);
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn reset_fixture() -> (
+        tempfile::TempDir,
+        crate::test_support::TestRepo,
+        GitClient,
+        String,
+        String,
+    ) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "tracked.txt", "base\n");
+        let base = commit_all(&repo, "base");
+        write_file(temp.path(), "tracked.txt", "target\n");
+        let target = commit_all(&repo, "target");
+        create_branch(&repo, "target", target.as_str());
+        let client = GitClient::from_path(temp.path());
+        (temp, repo, client, base, target)
+    }
 
     #[test]
     fn default_clone_path_handles_https_and_scp_style_urls() {
@@ -489,5 +782,324 @@ mod tests {
         assert!(origin_repo
             .find_reference("refs/heads/feature/login")
             .is_err());
+    }
+
+    #[test]
+    fn compare_commits_resolves_refs_and_does_not_mutate_repository() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        let base = commit_all(&repo, "base");
+        write_file(temp.path(), "feature.txt", "feature\n");
+        let target = commit_all(&repo, "feature");
+        create_branch(&repo, "feature/compare", target.as_str());
+
+        let client = GitClient::from_path(temp.path());
+        let head_before = client.resolve_commit("HEAD").unwrap();
+        let main_before = repo.find_reference("refs/heads/main").unwrap().target();
+        let feature_before = repo
+            .find_reference("refs/heads/feature/compare")
+            .unwrap()
+            .target();
+        let status_before = client.status().unwrap();
+
+        let comparison = client
+            .compare_commits(base.as_str(), "feature/compare")
+            .unwrap();
+
+        assert_eq!(comparison.left_oid, base);
+        assert_eq!(comparison.right_oid, target);
+        assert!(comparison.summary.contains("feature.txt"));
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), head_before);
+        assert_eq!(
+            repo.find_reference("refs/heads/main").unwrap().target(),
+            main_before
+        );
+        assert_eq!(
+            repo.find_reference("refs/heads/feature/compare")
+                .unwrap()
+                .target(),
+            feature_before
+        );
+        assert_eq!(client.status().unwrap(), status_before);
+
+        let equal = client
+            .compare_commits("feature/compare", target.as_str())
+            .unwrap();
+        assert!(equal.summary.contains("No changes"));
+        assert!(client
+            .compare_commits(base.as_str(), "missing/target")
+            .is_err());
+    }
+
+    #[test]
+    fn compare_commits_bounds_large_path_summaries() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        let base = commit_all(&repo, "base");
+
+        for index in 0..270 {
+            write_file(temp.path(), &format!("changed-{index:03}.txt"), "changed\n");
+        }
+        let target = commit_all(&repo, "many changed paths");
+        let comparison = GitClient::from_path(temp.path())
+            .compare_commits(base.as_str(), target.as_str())
+            .unwrap();
+
+        let shown_paths = comparison
+            .summary
+            .lines()
+            .filter(|line| line.contains(".txt |"))
+            .count();
+        assert!(shown_paths <= 250, "showed {shown_paths} paths");
+        assert!(comparison.summary.contains("270 files changed"));
+    }
+
+    #[test]
+    fn cherry_pick_applies_to_explicit_local_branch_and_leaves_it_active() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        let base = commit_all(&repo, "base");
+
+        create_branch(&repo, "source", base.as_str());
+        checkout_branch(&repo, "source");
+        write_file(temp.path(), "source.txt", "from source\n");
+        let source_oid = commit_all(&repo, "source change");
+        checkout_branch(&repo, "main");
+        create_branch(&repo, "destination", base.as_str());
+
+        let client = GitClient::from_path(temp.path());
+        let result = client
+            .cherry_pick_to_branch(source_oid.as_str(), "destination")
+            .unwrap();
+
+        assert_eq!(result.source_oid, source_oid);
+        assert_eq!(result.destination, "destination");
+        assert_eq!(result.status, super::CherryPickStatus::Applied);
+        assert_eq!(client.status().unwrap().branch_name, "destination");
+        assert_eq!(
+            repo.find_reference("refs/heads/source").unwrap().target(),
+            Some(source_oid)
+        );
+        let source_file = git_output(temp.path(), &["show", "HEAD:source.txt"]);
+        assert!(source_file.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&source_file.stdout),
+            "from source\n"
+        );
+    }
+
+    #[test]
+    fn cherry_pick_rejects_dirty_worktree_before_switching_destination() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "README.md", "base\n");
+        let base = commit_all(&repo, "base");
+
+        create_branch(&repo, "source", base.as_str());
+        checkout_branch(&repo, "source");
+        write_file(temp.path(), "source.txt", "from source\n");
+        let source_oid = commit_all(&repo, "source change");
+        checkout_branch(&repo, "main");
+        create_branch(&repo, "destination", base.as_str());
+        write_file(temp.path(), "untracked.txt", "keep me\n");
+        let client = GitClient::from_path(temp.path());
+        let head_before = client.resolve_commit("HEAD").unwrap();
+
+        let error = client
+            .cherry_pick_to_branch(source_oid.as_str(), "destination")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("clean"));
+        assert_eq!(client.status().unwrap().branch_name, "main");
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), head_before);
+        assert!(temp.path().join("untracked.txt").exists());
+        assert!(
+            !git_output(temp.path(), &["rev-parse", "--verify", "CHERRY_PICK_HEAD"])
+                .status
+                .success()
+        );
+    }
+
+    #[test]
+    fn cherry_pick_conflict_keeps_in_progress_state_on_destination_branch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = init_repo(temp.path(), "main");
+        configure_user(&repo);
+        write_file(temp.path(), "conflict.txt", "base\n");
+        let base = commit_all(&repo, "base");
+
+        create_branch(&repo, "source", base.as_str());
+        checkout_branch(&repo, "source");
+        write_file(temp.path(), "conflict.txt", "source\n");
+        let source_oid = commit_all(&repo, "source change");
+        checkout_branch(&repo, "main");
+        create_branch(&repo, "destination", base.as_str());
+        checkout_branch(&repo, "destination");
+        write_file(temp.path(), "conflict.txt", "destination\n");
+        commit_all(&repo, "destination change");
+
+        let client = GitClient::from_path(temp.path());
+        let result = client
+            .cherry_pick_to_branch(source_oid.as_str(), "destination")
+            .unwrap();
+
+        assert_eq!(result.status, super::CherryPickStatus::Conflict);
+        assert_eq!(client.status().unwrap().branch_name, "destination");
+        assert!(client
+            .status()
+            .unwrap()
+            .files
+            .iter()
+            .any(|entry| entry.code.contains('U')));
+        assert!(
+            git_output(temp.path(), &["rev-parse", "--verify", "CHERRY_PICK_HEAD"])
+                .status
+                .success()
+        );
+    }
+
+    #[test]
+    fn reset_soft_moves_head_and_preserves_index_and_worktree() {
+        let (temp, repo, client, base, target) = reset_fixture();
+        write_file(temp.path(), "tracked.txt", "staged\n");
+        checked_git(temp.path(), &["add", "--", "tracked.txt"]);
+        write_file(temp.path(), "tracked.txt", "worktree\n");
+
+        let result = client
+            .reset_to_commit(base.as_str(), ResetMode::Soft, "main", target.as_str())
+            .unwrap();
+
+        assert_eq!(result.previous_head, target);
+        assert_eq!(result.status, super::ResetStatus::Applied);
+        assert_eq!(result.resulting_head, Some(base.clone()));
+        assert_eq!(result.mode, ResetMode::Soft);
+        assert_eq!(
+            repo.find_reference("refs/heads/main").unwrap().target(),
+            Some(base)
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "worktree\n"
+        );
+        assert_eq!(client.status().unwrap().files[0].code, "MM");
+    }
+
+    #[test]
+    fn reset_mixed_moves_head_resets_index_and_preserves_worktree() {
+        let (temp, repo, client, base, target) = reset_fixture();
+        write_file(temp.path(), "tracked.txt", "staged\n");
+        checked_git(temp.path(), &["add", "--", "tracked.txt"]);
+
+        let result = client
+            .reset_to_commit(base.as_str(), ResetMode::Mixed, "main", target.as_str())
+            .unwrap();
+
+        assert_eq!(result.status, super::ResetStatus::Applied);
+        assert_eq!(result.resulting_head, Some(base.clone()));
+        assert_eq!(result.mode, ResetMode::Mixed);
+        assert_eq!(
+            repo.find_reference("refs/heads/main").unwrap().target(),
+            Some(base)
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(client.status().unwrap().files[0].code, " M");
+    }
+
+    #[test]
+    fn reset_hard_moves_head_and_resets_index_and_tracked_worktree() {
+        let (temp, repo, client, base, target) = reset_fixture();
+        write_file(temp.path(), "tracked.txt", "staged\n");
+        checked_git(temp.path(), &["add", "--", "tracked.txt"]);
+        write_file(temp.path(), "tracked.txt", "worktree\n");
+
+        let result = client
+            .reset_to_commit(base.as_str(), ResetMode::Hard, "main", target.as_str())
+            .unwrap();
+
+        assert_eq!(result.previous_head, target);
+        assert_eq!(result.status, super::ResetStatus::Applied);
+        assert_eq!(result.resulting_head, Some(base.clone()));
+        assert_eq!(result.mode, ResetMode::Hard);
+        assert_eq!(
+            repo.find_reference("refs/heads/main").unwrap().target(),
+            Some(base)
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(client.status().unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn reset_revalidates_expected_branch_and_head_before_mutation() {
+        let (_temp, repo, client, base, target) = reset_fixture();
+
+        let wrong_branch = client
+            .reset_to_commit(base.as_str(), ResetMode::Soft, "other", target.as_str())
+            .unwrap_err();
+        assert!(wrong_branch.to_string().contains("branch"));
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), target);
+
+        let wrong_head = client
+            .reset_to_commit(base.as_str(), ResetMode::Soft, "main", base.as_str())
+            .unwrap_err();
+        assert!(wrong_head.to_string().contains("HEAD"));
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), target);
+        assert_eq!(
+            repo.find_reference("refs/heads/main").unwrap().target(),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn reset_rejects_detached_head_and_unresolved_conflicts() {
+        let (temp, repo, client, base, target) = reset_fixture();
+        checked_git(temp.path(), &["switch", "--detach", "--", target.as_str()]);
+
+        let detached = client
+            .reset_to_commit(base.as_str(), ResetMode::Soft, "main", target.as_str())
+            .unwrap_err();
+        assert!(detached.to_string().contains("local branch"));
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), target);
+
+        checkout_branch(&repo, "main");
+        write_file(temp.path(), "conflict.txt", "base\n");
+        let base = commit_all(&repo, "conflict base");
+        create_branch(&repo, "source", base.as_str());
+        checkout_branch(&repo, "source");
+        write_file(temp.path(), "conflict.txt", "source\n");
+        let source = commit_all(&repo, "source conflict");
+        checkout_branch(&repo, "main");
+        create_branch(&repo, "destination", base.as_str());
+        checkout_branch(&repo, "destination");
+        write_file(temp.path(), "conflict.txt", "destination\n");
+        commit_all(&repo, "destination conflict");
+        let conflict_head = client.resolve_commit("HEAD").unwrap();
+        let pick = client
+            .cherry_pick_to_branch(source.as_str(), "destination")
+            .unwrap();
+        assert_eq!(pick.status, super::CherryPickStatus::Conflict);
+
+        let blocked = client
+            .reset_to_commit(
+                "main",
+                ResetMode::Soft,
+                "destination",
+                conflict_head.as_str(),
+            )
+            .unwrap_err();
+        assert!(blocked.to_string().contains("unresolved"));
+        assert_eq!(client.resolve_commit("HEAD").unwrap(), conflict_head);
     }
 }

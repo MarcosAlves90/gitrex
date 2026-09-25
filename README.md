@@ -258,6 +258,14 @@ history analysis.
 - Wide terminals place commit details beside the graph; narrower terminals stack details below it
 - Date/hash columns disappear progressively on narrow terminals to preserve the graph lanes and commit subject
 
+#### Commit actions
+
+`Enter` opens actions for the selected commit. **Compare** asks for another commit or branch, resolves both references, and shows a scrollable diff-stat summary with at most 250 path entries. It does not move refs, change the index or worktree, or contact a remote. Use `j`/`k`, the arrow keys, or `PgUp`/`PgDn` to review long results.
+
+**Cherry-pick** requires choosing and reviewing an existing local destination branch. The index and worktree, including untracked files, must be clean before Git switches branches. After an attempt, the destination stays active. If Git reports a conflict, GitRex refreshes the status and leaves the operation in progress for you to resolve and finish with `git cherry-pick --continue` or cancel with `git cherry-pick --abort`.
+
+**Reset current branch** is available only when the graph shows the checked-out local branch. Choose Soft, Mixed, or Hard; Soft is selected by default. Soft moves the branch tip and leaves the index and worktree unchanged. Mixed also resets the index while keeping worktree files. Hard overwrites tracked index and worktree files and can overwrite untracked paths that block tracked paths. Every mode has a review step; Hard adds a separate destructive confirmation that lists changed paths and keeps its `y` confirmation visible while you scroll. GitRex rechecks the current branch and `HEAD` immediately before reset. These actions run asynchronously and never stash changes or resolve conflicts automatically.
+
 ### Help screen
 
 The help screen is scrollable:

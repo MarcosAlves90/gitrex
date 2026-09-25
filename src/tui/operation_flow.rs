@@ -44,6 +44,10 @@ pub fn refresh_selected_branch_history(
 pub fn finish_operation(app: &mut App, outcome: OperationOutcome) -> anyhow::Result<()> {
     app.stop_loading();
     match outcome {
+        OperationOutcome::Comparison(comparison) => {
+            app.show_commit_comparison(comparison);
+            app.set_feedback("Commit comparison ready.", MessageKind::Info);
+        }
         OperationOutcome::Success { snapshot, message } => {
             app.apply_snapshot(snapshot);
             app.set_feedback(message, MessageKind::Success);
@@ -57,6 +61,23 @@ pub fn finish_operation(app: &mut App, outcome: OperationOutcome) -> anyhow::Res
         OperationOutcome::Error(message) => {
             app.set_feedback(message, MessageKind::Error);
         }
+        OperationOutcome::StateChangedFailure {
+            snapshot,
+            message,
+            refresh_warning,
+        } => {
+            if let Some(snapshot) = snapshot {
+                app.apply_snapshot(snapshot);
+            }
+            let (message, kind) = match refresh_warning {
+                Some(warning) => (
+                    format!("{message}. {warning}. Press r to refresh."),
+                    MessageKind::Warning,
+                ),
+                None => (message, MessageKind::Error),
+            };
+            app.set_feedback(message, kind);
+        }
     }
     Ok(())
 }
@@ -65,7 +86,7 @@ pub fn finish_operation(app: &mut App, outcome: OperationOutcome) -> anyhow::Res
 mod tests {
     use super::{begin_operation, finish_operation, refresh_selected_branch_history};
     use crate::{
-        domain::{BranchHistory, RepoSnapshot, RepoStatus},
+        domain::{BranchHistory, RepoSnapshot, RepoStatus, StatusEntry},
         git::GitClient,
         tui::{
             app::{App, MessageKind},
@@ -175,5 +196,56 @@ mod tests {
             .unwrap();
         assert_eq!(history.commits.len(), 1);
         assert_eq!(history.commits[0].subject, "base");
+    }
+
+    #[test]
+    fn state_changed_failure_applies_snapshot_and_reports_refresh_failure() {
+        let mut app = App::new();
+        let snapshot = RepoSnapshot {
+            status: RepoStatus {
+                branch_name: "destination".to_string(),
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                files: vec![StatusEntry {
+                    code: "UU".to_string(),
+                    path: "conflict.txt".to_string(),
+                }],
+            },
+            branches: Vec::new(),
+            history: BranchHistory::from_graph(Vec::new()),
+            selected_branch: Some("destination".to_string()),
+        };
+
+        finish_operation(
+            &mut app,
+            OperationOutcome::StateChangedFailure {
+                snapshot: Some(snapshot),
+                message: "Cherry-pick stopped with conflicts.".to_string(),
+                refresh_warning: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(app.status.as_ref().unwrap().branch_name, "destination");
+        assert_eq!(app.status.as_ref().unwrap().files[0].code, "UU");
+        assert_eq!(app.message_kind, MessageKind::Error);
+        assert!(app
+            .footer_text()
+            .contains("Cherry-pick stopped with conflicts"));
+
+        finish_operation(
+            &mut app,
+            OperationOutcome::StateChangedFailure {
+                snapshot: None,
+                message: "Hard reset completed but the view is stale.".to_string(),
+                refresh_warning: Some("Repository view refresh failed: unavailable".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(app.message_kind, MessageKind::Warning);
+        assert!(app.footer_text().contains("Hard reset completed"));
+        assert!(app.footer_text().contains("Press r to refresh"));
     }
 }
