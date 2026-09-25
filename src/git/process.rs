@@ -353,7 +353,7 @@ impl GitProcess {
                 "malformed Git content filter attributes".to_string(),
             ));
         }
-        let has_applicable_filter = fields.chunks_exact(3).any(|entry| {
+        let has_applicable_filter = fields.as_chunks::<3>().0.iter().any(|entry| {
             entry[1] == b"filter"
                 && active_filters
                     .iter()
