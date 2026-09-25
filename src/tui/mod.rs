@@ -2,6 +2,8 @@ mod app;
 mod branching;
 #[cfg(test)]
 mod cleanup_tests;
+#[cfg(test)]
+mod commit_action_tests;
 mod controller;
 mod layout;
 mod operation_flow;
