@@ -23,6 +23,7 @@
       "src/git/command.rs",
       "src/tui/app.rs",
       "src/tui/commit_action_tests.rs",
+      "src/tui/mod.rs",
       "src/tui/controller.rs",
       "src/tui/operation_flow.rs",
       "src/tui/operations.rs",
