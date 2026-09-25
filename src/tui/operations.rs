@@ -1,12 +1,16 @@
-use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::{
+    collections::BTreeSet,
+    sync::mpsc::{self, Receiver},
+};
 
 use crate::{
+    app::operations::execute_mutation,
     domain::{
         branch::{BranchCleanupOutcome, BranchCleanupState},
-        RepoSnapshot,
+        MutationRequest, OperationPreconditions, OperationResetMode, RepoSnapshot, Result,
     },
-    git::{CherryPickStatus, CommitComparison, GitClient, ResetMode, ResetStatus},
+    git::{CommitComparison, GitClient, ResetMode},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,33 +258,69 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
         OperationRequest::CleanupLocalBranches { branches, base } => {
             return execute_cleanup(client, branches, base);
         }
-        OperationRequest::Checkout { branch } => client
-            .checkout(&branch)
-            .map(|_| format!("Checked out {branch}")),
-        OperationRequest::CheckoutDetached { target } => client
-            .checkout(&target)
-            .map(|_| format!("Checked out detached HEAD at {target}")),
-        OperationRequest::Switch { branch } => client
-            .switch(&branch)
-            .map(|_| format!("Switched to {branch}")),
+        OperationRequest::Checkout { branch } => execute_shared_mutation(
+            &client,
+            MutationRequest::Checkout {
+                target: branch.clone(),
+            },
+            format!("Checked out {branch}"),
+        ),
+        OperationRequest::CheckoutDetached { target } => execute_shared_mutation(
+            &client,
+            MutationRequest::CheckoutDetached {
+                target: target.clone(),
+            },
+            format!("Checked out detached HEAD at {target}"),
+        ),
+        OperationRequest::Switch { branch } => execute_shared_mutation(
+            &client,
+            MutationRequest::Switch {
+                target: branch.clone(),
+            },
+            format!("Switched to {branch}"),
+        ),
         OperationRequest::CreateBranch {
             branch,
             start_point,
-        } => client
-            .create_branch(&branch, Some(&start_point))
-            .map(|_| format!("Created {branch} from {start_point}")),
-        OperationRequest::DeleteLocalBranch { branch } => client
-            .delete_local_branch(&branch)
-            .map(|_| format!("Deleted local branch {branch}")),
-        OperationRequest::DeleteRemoteBranch { remote, branch } => client
-            .delete_remote_branch(&remote, &branch)
-            .map(|_| format!("Deleted remote branch {remote}/{branch}")),
-        OperationRequest::Pull { remote, branch } => client
-            .pull(remote.as_deref(), branch.as_deref())
-            .map(|_| String::from("Pull complete.")),
-        OperationRequest::Push { remote, branch } => client
-            .push(remote.as_deref(), branch.as_deref())
-            .map(|_| String::from("Push complete.")),
+        } => execute_shared_mutation(
+            &client,
+            MutationRequest::CreateBranch {
+                name: branch.clone(),
+                from: Some(start_point.clone()),
+            },
+            format!("Created {branch} from {start_point}"),
+        ),
+        OperationRequest::DeleteLocalBranch { branch } => execute_shared_mutation(
+            &client,
+            MutationRequest::DeleteLocalBranch {
+                branch: branch.clone(),
+            },
+            format!("Deleted local branch {branch}"),
+        ),
+        OperationRequest::DeleteRemoteBranch { remote, branch } => execute_shared_mutation(
+            &client,
+            MutationRequest::DeleteRemoteBranch {
+                remote: remote.clone(),
+                branch: branch.clone(),
+            },
+            format!("Deleted remote branch {remote}/{branch}"),
+        ),
+        OperationRequest::Pull { remote, branch } => execute_shared_mutation(
+            &client,
+            MutationRequest::Pull {
+                remote: remote.clone(),
+                branch: branch.clone(),
+            },
+            String::from("Pull complete."),
+        ),
+        OperationRequest::Push { remote, branch } => execute_shared_mutation(
+            &client,
+            MutationRequest::Push {
+                remote: remote.clone(),
+                branch: branch.clone(),
+            },
+            String::from("Push complete."),
+        ),
     };
 
     match result {
@@ -298,50 +338,53 @@ fn execute_operation(client: GitClient, request: OperationRequest) -> OperationO
     }
 }
 
+fn execute_shared_mutation(
+    client: &GitClient,
+    request: MutationRequest,
+    message: String,
+) -> Result<String> {
+    let execution = execute_mutation(client, &request, &OperationPreconditions::default())?;
+    if let Some(failure) = execution.failure {
+        return Err(failure.error);
+    }
+    Ok(message)
+}
+
 fn execute_cherry_pick(client: GitClient, source: String, destination: String) -> OperationOutcome {
-    let result = match client.cherry_pick_to_branch(&source, &destination) {
-        Ok(result) => result,
+    let request = MutationRequest::CherryPick {
+        source: source.clone(),
+        destination: destination.clone(),
+    };
+    let execution = match execute_mutation(&client, &request, &OperationPreconditions::default()) {
+        Ok(execution) => execution,
         Err(error) => return OperationOutcome::Error(error.to_string()),
     };
-    match result.status {
-        CherryPickStatus::Applied => {
-            let message = format!(
-                "Cherry-picked {} onto local branch {destination}",
-                short_oid(&result.source_oid)
-            );
-            match client.snapshot() {
-                Ok(snapshot) => OperationOutcome::Success { snapshot, message },
-                Err(error) => OperationOutcome::SuccessWithRefreshWarning {
-                    message,
-                    warning: format!("Repository view refresh failed: {error}"),
-                },
-            }
+    let success_message = format!(
+        "Cherry-picked {} onto local branch {destination}",
+        short_oid(&source)
+    );
+    let failure_message = execution.failure.as_ref().map(|failure| {
+        let detail = failure.error.to_string();
+        if let Some((_, detail)) = detail.split_once("cherry-pick conflict:") {
+            format!(
+                "Cherry-pick conflict on local branch {destination} for {}. Resolve conflicts, then run `git cherry-pick --continue` or `git cherry-pick --abort`.{}",
+                short_oid(&source),
+                detail
+            )
+        } else if let Some((_, detail)) = detail.split_once("cherry-pick stopped:") {
+            format!(
+                "Cherry-pick is paused on local branch {destination} without unresolved file conflicts for {}. If the change is already applied or empty, run `git cherry-pick --skip`; run `git cherry-pick --abort` to cancel.{}",
+                short_oid(&source),
+                detail
+            )
+        } else {
+            format!(
+                "Cherry-pick attempt failed on local branch {destination} for {}. Inspect the repository state before continuing. {detail}",
+                short_oid(&source)
+            )
         }
-        CherryPickStatus::Conflict => state_changed_failure(
-            &client,
-            format!(
-                "Cherry-pick conflict on local branch {destination} for {}. Resolve conflicts, then run `git cherry-pick --continue` or `git cherry-pick --abort`. {}",
-                short_oid(&result.source_oid),
-                result.detail
-            ),
-        ),
-        CherryPickStatus::Stopped => state_changed_failure(
-            &client,
-            format!(
-                "Cherry-pick is paused on local branch {destination} without unresolved file conflicts for {}. If the change is already applied or empty, run `git cherry-pick --skip`; run `git cherry-pick --abort` to cancel. {}",
-                short_oid(&result.source_oid),
-                result.detail
-            ),
-        ),
-        CherryPickStatus::Failed => state_changed_failure(
-            &client,
-            format!(
-                "Cherry-pick attempt failed on local branch {destination} for {}. Inspect the repository state before continuing. {}",
-                short_oid(&result.source_oid),
-                result.detail
-            ),
-        ),
-    }
+    });
+    finish_shared_execution(&client, execution, success_message, failure_message)
 }
 
 fn execute_reset(
@@ -351,39 +394,75 @@ fn execute_reset(
     expected_branch: String,
     expected_head: String,
 ) -> OperationOutcome {
-    let result = match client.reset_to_commit(&target, mode, &expected_branch, &expected_head) {
-        Ok(result) => result,
+    let operation_mode = match mode {
+        ResetMode::Soft => OperationResetMode::Soft,
+        ResetMode::Mixed => OperationResetMode::Mixed,
+        ResetMode::Hard => OperationResetMode::Hard,
+    };
+    let request = MutationRequest::Reset {
+        target: target.clone(),
+        mode: operation_mode,
+    };
+    let preconditions = OperationPreconditions {
+        expect_head: Some(expected_head),
+        expect_branch: Some(expected_branch.clone()),
+        expect_upstream: None,
+    };
+    let execution = match execute_mutation(&client, &request, &preconditions) {
+        Ok(execution) => execution,
         Err(error) => return OperationOutcome::Error(error.to_string()),
     };
-
-    let resulting_head = result
-        .resulting_head
-        .as_deref()
-        .unwrap_or(result.target_oid.as_str());
-    if result.status == ResetStatus::Applied {
-        let message = format!(
-            "Reset local branch {expected_branch} ({}) from {} to {}",
+    let success_message = format!(
+        "Reset local branch {expected_branch} ({}) from {} to {}",
+        mode.label(),
+        execution
+            .receipt
+            .before
+            .head
+            .as_deref()
+            .map(short_oid)
+            .unwrap_or_default(),
+        execution
+            .receipt
+            .after
+            .head
+            .as_deref()
+            .map(short_oid)
+            .unwrap_or_else(|| short_oid(&target))
+    );
+    let failure_message = execution.failure.as_ref().map(|failure| {
+        format!(
+            "Reset attempt failed for local branch {expected_branch} ({}) at target {}. {}",
             mode.label(),
-            short_oid(&result.previous_head),
-            short_oid(resulting_head)
-        );
-        match client.snapshot() {
-            Ok(snapshot) => OperationOutcome::Success { snapshot, message },
-            Err(error) => OperationOutcome::SuccessWithRefreshWarning {
-                message,
-                warning: format!("Repository view refresh failed: {error}"),
-            },
-        }
-    } else {
-        state_changed_failure(
-            &client,
-            format!(
-                "Reset attempt failed for local branch {expected_branch} ({}) at target {}. {}",
-                mode.label(),
-                short_oid(&result.target_oid),
-                result.detail
-            ),
+            short_oid(&target),
+            failure.error
         )
+    });
+    finish_shared_execution(&client, execution, success_message, failure_message)
+}
+
+fn finish_shared_execution(
+    client: &GitClient,
+    execution: crate::domain::OperationExecution,
+    success_message: String,
+    failure_message: Option<String>,
+) -> OperationOutcome {
+    if let Some(message) = failure_message {
+        return if execution.receipt.state_changed {
+            state_changed_failure(client, message)
+        } else {
+            OperationOutcome::Error(message)
+        };
+    }
+    match client.snapshot() {
+        Ok(snapshot) => OperationOutcome::Success {
+            snapshot,
+            message: success_message,
+        },
+        Err(error) => OperationOutcome::SuccessWithRefreshWarning {
+            message: success_message,
+            warning: format!("Repository view refresh failed: {error}"),
+        },
     }
 }
 
@@ -407,18 +486,68 @@ fn short_oid(oid: &str) -> String {
 }
 
 fn execute_cleanup(client: GitClient, branches: Vec<String>, base: String) -> OperationOutcome {
-    let outcomes = branches
-        .into_iter()
-        .map(|branch| {
-            client
-                .cleanup_local_branch(&branch, &base, &[], &[])
-                .unwrap_or_else(|error| BranchCleanupOutcome {
+    let request = MutationRequest::Cleanup {
+        base: base.clone(),
+        branches: Some(branches.clone()),
+        exclusions: Vec::new(),
+        remotes: Vec::new(),
+    };
+    let outcomes: Vec<BranchCleanupOutcome> =
+        match execute_mutation(&client, &request, &OperationPreconditions::default()) {
+            Err(error) => branches
+                .into_iter()
+                .map(|branch| BranchCleanupOutcome {
                     branch,
                     state: BranchCleanupState::Failed,
                     detail: Some(error.to_string()),
                 })
-        })
-        .collect::<Vec<_>>();
+                .collect(),
+            Ok(execution) => {
+                let planned = execution
+                    .plan
+                    .expected_local_effects
+                    .iter()
+                    .filter_map(|effect| effect.target.strip_prefix("refs/heads/"))
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<_>>();
+                let deleted = execution
+                    .receipt
+                    .confirmed_local_effects
+                    .iter()
+                    .filter_map(|effect| effect.target.strip_prefix("refs/heads/"))
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<_>>();
+                let failure = execution
+                    .failure
+                    .as_ref()
+                    .map(|failure| failure.error.to_string());
+                branches
+                    .into_iter()
+                    .map(|branch| {
+                        let (state, detail) = if deleted.contains(&branch) {
+                            (BranchCleanupState::Deleted, None)
+                        } else if !planned.contains(&branch) {
+                            (
+                                BranchCleanupState::Skipped,
+                                Some(String::from("branch was no longer eligible for cleanup")),
+                            )
+                        } else {
+                            (
+                                BranchCleanupState::Failed,
+                                Some(failure.clone().unwrap_or_else(|| {
+                                    String::from("planned branch was not deleted")
+                                })),
+                            )
+                        };
+                        BranchCleanupOutcome {
+                            branch,
+                            state,
+                            detail,
+                        }
+                    })
+                    .collect()
+            }
+        };
     let message = format_cleanup_report(&outcomes);
 
     match client.snapshot() {

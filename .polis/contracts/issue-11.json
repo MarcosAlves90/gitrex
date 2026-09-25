@@ -1,0 +1,120 @@
+{
+  "schema_version": 5,
+  "kind": "feature",
+  "commit": {
+    "message": "feat(safety): plan and verify git mutations"
+  },
+  "scope": {
+    "allowed_paths": [
+      ".polis/contracts/issue-11.json",
+      ".polis/contracts/issue-11-locked.json",
+      ".polis/contracts/issue-11-red.patch",
+      "README.md",
+      "src/app/mod.rs",
+      "src/app/operations.rs",
+      "src/cli/args.rs",
+      "src/cli/mod.rs",
+      "src/cli/output.rs",
+      "src/cli/protocol.rs",
+      "src/domain/error.rs",
+      "src/domain/mod.rs",
+      "src/domain/operation.rs",
+      "src/git/command.rs",
+      "src/tui/cleanup_tests.rs",
+      "src/tui/commit_action_tests.rs",
+      "src/tui/controller.rs",
+      "src/tui/operations.rs",
+      "tests/cli_mutation_safety.rs",
+      "tests/cli_mutation_red_probe.rs",
+      "tests/fixtures/protocol/v1/capabilities.json"
+    ]
+  },
+  "test_scope": {
+    "allowed_paths": [
+      "tests/cli_mutation_safety.rs",
+      "src/tui/cleanup_tests.rs",
+      "src/tui/commit_action_tests.rs",
+      "src/tui/controller.rs",
+      "src/cli/protocol.rs",
+      "src/app/operations.rs",
+      "tests/cli_mutation_red_probe.rs",
+      "tests/fixtures/protocol/v1/capabilities.json"
+    ]
+  },
+  "development_method": "strict_sdd_tdd_v1",
+  "specification": {
+    "objective": "Make GitRex mutations deterministic to plan, guarded against stale observations, and verifiable through shared CLI and TUI operation logic.",
+    "requirements": [
+      {"id":"REQ-001","statement":"Model each supported mutation with explicit identity, preconditions, expected local and remote effects, network needs, effect and risk classifications, refs, and immutable commit IDs."},
+      {"id":"REQ-002","statement":"Provide side-effect-free dry-run planning for create-branch, switch, cleanup, fetch, pull, and push, showing resolved state, expected effects, risk, immutable IDs, and whether the plan is GitRex analysis or Git-provided dry-run."},
+      {"id":"REQ-003","statement":"Accept expected HEAD, branch, and upstream preconditions, recheck them immediately before mutation, fail closed with PRECONDITION_CHANGED and safe observed state when they differ."},
+      {"id":"REQ-004","statement":"Return structured operation receipts containing identity, changed-state status, relevant before and after identifiers, confirmed effects, and a distinct verification result."},
+      {"id":"REQ-005","statement":"Classify operations as read_only, local_mutation, network_read, remote_mutation, or destructive and expose classification through deterministic CLI capabilities without treating names or generated text as authorization."},
+      {"id":"REQ-006","statement":"After mutations, inspect only affected Git state, verify operation-specific expected effects, report verification failures separately from execution failures, and cover concurrency-sensitive cases with regression tests."},
+      {"id":"REQ-007","statement":"Route CLI and TUI mutations through shared domain/application logic while preserving supported existing behavior and safety checks."}
+    ],
+    "acceptance_criteria": [
+      {"id":"AC-001","statement":"Plans are typed, deterministic for the same observed Git state, adapter-independent, and include refs and immutable IDs when resolvable.","requirements":["REQ-001"],"proof":"regression"},
+      {"id":"AC-002","statement":"Each named operation supports dry-run; tests show that local refs, index, worktree, and remote refs do not change, and output identifies its dry-run provenance and risk.","requirements":["REQ-002"],"proof":"regression"},
+      {"id":"AC-003","statement":"A changed expected HEAD, branch, or upstream blocks the mutation with PRECONDITION_CHANGED and safe observed-state details.","requirements":["REQ-003"],"proof":"regression"},
+      {"id":"AC-004","statement":"Structured receipts distinguish execution, observed effects, and verification; unobservable remote effects are not reported as confirmed.","requirements":["REQ-004","REQ-006"],"proof":"regression"},
+      {"id":"AC-005","statement":"All five effect/risk classes are explicit and visible in capabilities; operation names and caller-provided descriptions cannot grant authorization.","requirements":["REQ-005"],"proof":"regression"},
+      {"id":"AC-006","statement":"CLI and TUI use shared operation semantics and retain existing cleanup/reset safeguards and supported interactions.","requirements":["REQ-007"],"proof":"regression"}
+    ],
+    "invariants": [
+      {"id":"INV-001","statement":"Dry-run never mutates local or remote Git state."},
+      {"id":"INV-002","statement":"Risk classification describes effects but never grants authorization."},
+      {"id":"INV-003","statement":"A Git command exit code alone cannot produce a verified receipt."}
+    ],
+    "forbidden_states": [
+      {"id":"FORB-001","statement":"A stale expected state is ignored and a mutation proceeds."},
+      {"id":"FORB-002","statement":"A receipt claims an effect that was not observed, or a remote effect that Git did not confirm."},
+      {"id":"FORB-003","statement":"A branch name or model-generated text is interpreted as authorization."}
+    ],
+    "inputs": [
+      {"id":"IN-001","statement":"A supported operation and its arguments, optional expected HEAD/branch/upstream values, and dry-run mode."},
+      {"id":"IN-002","statement":"Current Git state read through the repository-bound Git client."}
+    ],
+    "outputs": [
+      {"id":"OUT-001","statement":"A deterministic operation plan or a structured precondition/execution failure."},
+      {"id":"OUT-002","statement":"After execution, a structured receipt containing observed effects and operation-specific verification."}
+    ],
+    "failure_semantics": [
+      {"id":"FAIL-001","statement":"Expected-state mismatch returns stable code PRECONDITION_CHANGED before invoking the mutation and includes only safe observed state."},
+      {"id":"FAIL-002","statement":"Git execution errors and post-operation verification failures use distinct structured error semantics."},
+      {"id":"FAIL-003","statement":"Unknown remote outcomes remain unconfirmed in the receipt."}
+    ]
+  },
+  "behavior": {
+    "argv": ["cargo", "run", "--locked", "--", "--help"],
+    "cwd": ".",
+    "timeout_seconds": 120,
+    "environment": {
+      "mode": "clean",
+      "pass": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE", "LOCALAPPDATA"]
+    }
+  },
+  "affected": {
+    "argv": ["cargo", "test", "--all", "--locked"],
+    "cwd": ".",
+    "timeout_seconds": 1200,
+    "environment": {
+      "mode": "clean",
+      "pass": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE", "LOCALAPPDATA"]
+    }
+  },
+  "regression": {
+    "mode": "red_green",
+    "command": {
+      "argv": ["cargo", "test", "--test", "cli_mutation_red_probe", "dry_run_plans_branch_creation_without_mutation", "--", "--exact"],
+      "cwd": ".",
+      "timeout_seconds": 1200,
+      "environment": {
+        "mode": "clean",
+        "pass": ["PATH", "HOME", "TMPDIR", "TMP", "TEMP", "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE", "LOCALAPPDATA"]
+      }
+    },
+    "baseline_exit_code": 101,
+    "baseline_output_contains": ["dry_run_plans_branch_creation_without_mutation"]
+  }
+}

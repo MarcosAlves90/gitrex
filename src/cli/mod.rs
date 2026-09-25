@@ -2,13 +2,14 @@ mod args;
 pub mod output;
 pub(crate) mod protocol;
 
+use crate::app::operations as mutation_ops;
 use crate::app::repository_context::{
     self as context_ops, ContextLimits, DiffOptions, DiffSelection,
 };
-use crate::domain::branch::{BranchCleanupOutcome, BranchCleanupState};
+use crate::domain::{MutationRequest, OperationPreconditions};
 use crate::git::GitClient;
 
-pub use args::{Cli, Commands, OutputFormat};
+pub use args::{Cli, Commands, MutationOutputArgs, OutputFormat, PlannedMutationOutputArgs};
 
 pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<()> {
     match command {
@@ -161,23 +162,40 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
             }
             Ok(())
         }
-        Some(Commands::Checkout { target }) => {
-            client.checkout(&target)?;
-            output::print_message(&format!("checked out {target}"));
-            Ok(())
-        }
-        Some(Commands::Switch { target }) => {
-            client.switch(&target)?;
-            output::print_message(&format!("switched to {target}"));
-            Ok(())
-        }
-        Some(Commands::CreateBranch { name, from }) => {
-            client.create_branch(&name, from.as_deref())?;
-            match from {
-                Some(source) => output::print_message(&format!("created {name} from {source}")),
-                None => output::print_message(&format!("created {name}")),
-            }
-            Ok(())
+        Some(Commands::Checkout { target, options }) => run_mutation(
+            &client,
+            MutationRequest::Checkout {
+                target: target.clone(),
+            },
+            &options,
+            false,
+            &format!("checked out {target}"),
+        ),
+        Some(Commands::Switch { target, options }) => run_mutation(
+            &client,
+            MutationRequest::Switch {
+                target: target.clone(),
+            },
+            &options.mutation,
+            options.dry_run,
+            &format!("switched to {target}"),
+        ),
+        Some(Commands::CreateBranch {
+            name,
+            from,
+            options,
+        }) => {
+            let message = match from.as_deref() {
+                Some(source) => format!("created {name} from {source}"),
+                None => format!("created {name}"),
+            };
+            run_mutation(
+                &client,
+                MutationRequest::CreateBranch { name, from },
+                &options.mutation,
+                options.dry_run,
+                &message,
+            )
         }
         Some(Commands::Clone {
             repository,
@@ -187,35 +205,104 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
             output::print_message("clone complete");
             Ok(())
         }
-        Some(Commands::Fetch { remote }) => {
-            client.fetch(remote.as_deref())?;
-            output::print_message("fetch complete");
-            Ok(())
-        }
-        Some(Commands::Pull { remote, branch }) => {
-            client.pull(remote.as_deref(), branch.as_deref())?;
-            output::print_message("pull complete");
-            Ok(())
-        }
-        Some(Commands::Push { remote, branch }) => {
-            client.push(remote.as_deref(), branch.as_deref())?;
-            output::print_message("push complete");
-            Ok(())
-        }
+        Some(Commands::Fetch { remote, options }) => run_mutation(
+            &client,
+            MutationRequest::Fetch { remote },
+            &options.mutation,
+            options.dry_run,
+            "fetch complete",
+        ),
+        Some(Commands::Pull {
+            remote,
+            branch,
+            options,
+        }) => run_mutation(
+            &client,
+            MutationRequest::Pull { remote, branch },
+            &options.mutation,
+            options.dry_run,
+            "pull complete",
+        ),
+        Some(Commands::Push {
+            remote,
+            branch,
+            options,
+        }) => run_mutation(
+            &client,
+            MutationRequest::Push { remote, branch },
+            &options.mutation,
+            options.dry_run,
+            "push complete",
+        ),
         Some(Commands::Cleanup {
             base,
             exclusions,
             remotes,
             yes,
-        }) => {
-            execute_cleanup(&client, base, exclusions, remotes, yes)?;
-            Ok(())
-        }
+            options,
+        }) => execute_cleanup(&client, base, exclusions, remotes, yes, options),
         Some(Commands::Tui) | None => {
             output::print_help_hint();
             Ok(())
         }
     }
+}
+
+fn run_mutation(
+    client: &GitClient,
+    request: MutationRequest,
+    options: &MutationOutputArgs,
+    dry_run: bool,
+    success_message: &str,
+) -> anyhow::Result<()> {
+    let operation = request.name();
+    let preconditions = OperationPreconditions {
+        expect_head: options.expect_head.clone(),
+        expect_branch: options.expect_branch.clone(),
+        expect_upstream: options.expect_upstream.clone(),
+    };
+    if dry_run {
+        return match mutation_ops::plan_mutation(client, &request, &preconditions) {
+            Ok(plan) => match options.format {
+                OutputFormat::Json => protocol::print_operation_plan(operation, plan),
+                OutputFormat::Text => {
+                    output::print_operation_plan(&plan);
+                    Ok(())
+                }
+            },
+            Err(error) => {
+                if options.format == OutputFormat::Json {
+                    protocol::print_failure(operation, &error)?;
+                }
+                Err(anyhow::Error::new(error))
+            }
+        };
+    }
+
+    let execution = match mutation_ops::execute_mutation(client, &request, &preconditions) {
+        Ok(execution) => execution,
+        Err(error) => {
+            if options.format == OutputFormat::Json {
+                protocol::print_failure(operation, &error)?;
+            }
+            return Err(anyhow::Error::new(error));
+        }
+    };
+    let failure_message = execution
+        .failure
+        .as_ref()
+        .map(|failure| failure.error.to_string());
+    if options.format == OutputFormat::Json {
+        protocol::print_operation_execution(operation, execution)?;
+    } else if let Some(message) = &failure_message {
+        output::print_message(message);
+    } else {
+        output::print_message(success_message);
+    }
+    if let Some(message) = failure_message {
+        anyhow::bail!(message);
+    }
+    Ok(())
 }
 
 fn execute_read_only<T, U>(
@@ -251,68 +338,103 @@ fn execute_cleanup(
     exclusions: Vec<String>,
     remotes: Vec<String>,
     yes: bool,
+    options: PlannedMutationOutputArgs,
 ) -> anyhow::Result<()> {
     let base = base.unwrap_or_else(|| String::from("HEAD"));
-    let candidates = client.merged_local_branches(&base, &exclusions, &remotes)?;
-
-    output::print_message(&format!("Merged local branches reachable from {base}:"));
-    if candidates.is_empty() {
-        output::print_message("No merged local branches found.");
-    } else {
-        for candidate in &candidates {
-            output::print_message(&format!("  {}", candidate.name));
+    let request = MutationRequest::Cleanup {
+        base: base.clone(),
+        branches: None,
+        exclusions: exclusions.clone(),
+        remotes: remotes.clone(),
+    };
+    let preconditions = OperationPreconditions {
+        expect_head: options.mutation.expect_head.clone(),
+        expect_branch: options.mutation.expect_branch.clone(),
+        expect_upstream: options.mutation.expect_upstream.clone(),
+    };
+    if options.dry_run || !yes {
+        let plan = match mutation_ops::plan_mutation(client, &request, &preconditions) {
+            Ok(plan) => plan,
+            Err(error) => {
+                if options.mutation.format == OutputFormat::Json {
+                    protocol::print_failure("cleanup", &error)?;
+                }
+                return Err(anyhow::Error::new(error));
+            }
+        };
+        if options.mutation.format == OutputFormat::Json {
+            return protocol::print_operation_plan("cleanup", plan);
         }
-    }
-
-    if !yes {
-        output::print_message("Preview only; pass --yes to delete these branches.");
+        output::print_message(&format!("Merged local branches reachable from {base}:"));
+        if plan.expected_local_effects.is_empty() {
+            output::print_message("No merged local branches found.");
+        } else {
+            for effect in &plan.expected_local_effects {
+                if let Some(branch) = effect.target.strip_prefix("refs/heads/") {
+                    output::print_message(&format!("  {branch}"));
+                }
+            }
+        }
+        if options.dry_run {
+            output::print_operation_plan(&plan);
+        } else {
+            output::print_message("Preview only; pass --yes to delete these branches.");
+        }
         return Ok(());
     }
 
-    let outcomes = candidates
-        .iter()
-        .map(|candidate| {
-            client
-                .cleanup_local_branch(&candidate.name, &base, &exclusions, &remotes)
-                .unwrap_or_else(|error| BranchCleanupOutcome {
-                    branch: candidate.name.clone(),
-                    state: BranchCleanupState::Failed,
-                    detail: Some(error.to_string()),
-                })
-        })
-        .collect::<Vec<_>>();
-
-    let mut deleted = 0;
-    let mut skipped = 0;
-    let mut failed = 0;
-    for outcome in &outcomes {
-        let (label, detail) = match outcome.state {
-            BranchCleanupState::Deleted => {
-                deleted += 1;
-                ("deleted", None)
+    let plan = mutation_ops::plan_mutation(client, &request, &preconditions);
+    let planned_branches = match plan {
+        Ok(plan) => plan
+            .expected_local_effects
+            .iter()
+            .filter_map(|effect| effect.target.strip_prefix("refs/heads/").map(str::to_owned))
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            if options.mutation.format == OutputFormat::Json {
+                protocol::print_failure("cleanup", &error)?;
             }
-            BranchCleanupState::Skipped => {
-                skipped += 1;
-                ("skipped", outcome.detail.as_deref())
-            }
-            BranchCleanupState::Failed => {
-                failed += 1;
-                ("failed", outcome.detail.as_deref())
-            }
-        };
-        match detail {
-            Some(detail) => {
-                output::print_message(&format!("{label}: {} ({detail})", outcome.branch))
-            }
-            None => output::print_message(&format!("{label}: {}", outcome.branch)),
+            return Err(anyhow::Error::new(error));
         }
+    };
+    let execution = match mutation_ops::execute_mutation(client, &request, &preconditions) {
+        Ok(execution) => execution,
+        Err(error) => {
+            if options.mutation.format == OutputFormat::Json {
+                protocol::print_failure("cleanup", &error)?;
+            }
+            return Err(anyhow::Error::new(error));
+        }
+    };
+    let failure_message = execution
+        .failure
+        .as_ref()
+        .map(|failure| failure.error.to_string());
+    if options.mutation.format == OutputFormat::Json {
+        protocol::print_operation_execution("cleanup", execution)?;
+    } else {
+        let deleted = execution.receipt.confirmed_local_effects.len();
+        let skipped = planned_branches.len().saturating_sub(deleted);
+        for branch in &planned_branches {
+            let label = if execution
+                .receipt
+                .confirmed_local_effects
+                .iter()
+                .any(|effect| effect.target == format!("refs/heads/{branch}"))
+            {
+                "deleted"
+            } else {
+                "skipped"
+            };
+            output::print_message(&format!("{label}: {branch}"));
+        }
+        output::print_message(&format!(
+            "Cleanup complete: {deleted} deleted, {skipped} skipped, {} failed.",
+            usize::from(failure_message.is_some())
+        ));
     }
-    output::print_message(&format!(
-        "Cleanup complete: {deleted} deleted, {skipped} skipped, {failed} failed."
-    ));
-
-    if failed > 0 {
-        anyhow::bail!("{failed} local branch cleanup operation(s) failed");
+    if let Some(message) = failure_message {
+        anyhow::bail!(message);
     }
     Ok(())
 }

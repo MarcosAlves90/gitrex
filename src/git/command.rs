@@ -228,20 +228,41 @@ impl GitClient {
         destination: &str,
     ) -> Result<CherryPickResult> {
         let source_oid = self.resolve_commit(source_reference)?;
+        self.cherry_pick_resolved_to_branch(&source_oid, destination, true)
+    }
+
+    pub(crate) fn cherry_pick_planned_to_branch(
+        &self,
+        source_oid: &str,
+        destination: &str,
+    ) -> Result<CherryPickResult> {
+        self.cherry_pick_resolved_to_branch(source_oid, destination, false)
+    }
+
+    fn cherry_pick_resolved_to_branch(
+        &self,
+        source_oid: &str,
+        destination: &str,
+        validate_initial_state: bool,
+    ) -> Result<CherryPickResult> {
+        let source_oid = source_oid.to_string();
         let git = self.git();
-        git.ensure_repository()?;
+        if validate_initial_state {
+            git.ensure_repository()?;
 
-        let destination_ref = format!("refs/heads/{destination}");
-        let branch = git.probe(["show-ref", "--verify", "--quiet", destination_ref.as_str()])?;
-        if !branch.success() {
-            return Err(GitError::ReferenceNotFound(destination.to_string()));
-        }
+            let destination_ref = format!("refs/heads/{destination}");
+            let branch =
+                git.probe(["show-ref", "--verify", "--quiet", destination_ref.as_str()])?;
+            if !branch.success() {
+                return Err(GitError::ReferenceNotFound(destination.to_string()));
+            }
 
-        let dirty = git.run_text(["status", "--porcelain=v1", "--untracked-files=all"])?;
-        if !dirty.trim().is_empty() {
-            return Err(GitError::Backend(
-                "cherry-pick requires a clean index and worktree".to_string(),
-            ));
+            let dirty = git.run_text(["status", "--porcelain=v1", "--untracked-files=all"])?;
+            if !dirty.trim().is_empty() {
+                return Err(GitError::Backend(
+                    "cherry-pick requires a clean index and worktree".to_string(),
+                ));
+            }
         }
 
         let source_collisions = self.untracked_paths_overlapping_commit(&source_oid)?;
@@ -257,7 +278,13 @@ impl GitClient {
             });
         }
 
-        if let Err(error) = self.switch_without_overwriting_ignored(destination) {
+        let switch_result = if validate_initial_state {
+            self.switch_without_overwriting_ignored(destination)
+        } else {
+            git.run(["switch", "--no-overwrite-ignore", "--", destination])
+                .map(|_| ())
+        };
+        if let Err(error) = switch_result {
             return Ok(CherryPickResult {
                 source_oid,
                 destination: destination.to_string(),

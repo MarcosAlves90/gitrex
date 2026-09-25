@@ -4,7 +4,7 @@ use crate::domain::{
         ChangeContextReport, CompareReport, ContextCommit, DiffReport, PathGroup,
         RepositoryContext, ShowReport, WorkingTreeContext,
     },
-    BranchInfo, CommitSummary, GraphLine, RepoStatus, StatusEntry,
+    BranchInfo, CommitSummary, GraphLine, OperationClass, OperationPlan, RepoStatus, StatusEntry,
 };
 use ratatui::prelude::{Line, Modifier, Span, Style};
 
@@ -23,6 +23,82 @@ pub fn print_status(status: &RepoStatus) {
     println!("working tree:");
     for file in &status.files {
         println!("  {} {}", file.code, file.path);
+    }
+}
+
+pub fn print_operation_plan(plan: &OperationPlan) {
+    println!("operation: {}", plan.operation);
+    println!("risk class: {}", operation_class_name(plan.risk_class));
+    println!(
+        "effects: {}",
+        plan.effects
+            .iter()
+            .map(|effect| operation_class_name(*effect))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("dry-run source: {:?}", plan.planning_source);
+    println!(
+        "network access required: {}",
+        if plan.network_access_required {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    println!(
+        "network access during planning: {}",
+        if plan.network_access_during_planning {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    if !plan.expected_local_effects.is_empty() {
+        println!("expected local effects:");
+        for effect in &plan.expected_local_effects {
+            print_expected_effect(
+                effect.action.as_str(),
+                effect.target.as_str(),
+                effect.commit_id.as_deref(),
+            );
+        }
+    }
+    if !plan.expected_remote_effects.is_empty() {
+        println!("expected remote effects:");
+        for effect in &plan.expected_remote_effects {
+            print_expected_effect(
+                effect.action.as_str(),
+                effect.target.as_str(),
+                effect.commit_id.as_deref(),
+            );
+        }
+    }
+    if !plan.refs.is_empty() {
+        println!("observed refs:");
+        for reference in &plan.refs {
+            match &reference.commit_id {
+                Some(commit_id) => println!("  {} {commit_id}", reference.name),
+                None => println!("  {} (absent)", reference.name),
+            }
+        }
+    }
+}
+
+fn print_expected_effect(action: &str, target: &str, commit_id: Option<&str>) {
+    match commit_id {
+        Some(commit_id) => println!("  {action}: {target} at {commit_id}"),
+        None => println!("  {action}: {target}"),
+    }
+}
+
+fn operation_class_name(class: OperationClass) -> &'static str {
+    match class {
+        OperationClass::ReadOnly => "read_only",
+        OperationClass::LocalMutation => "local_mutation",
+        OperationClass::NetworkRead => "network_read",
+        OperationClass::RemoteMutation => "remote_mutation",
+        OperationClass::Destructive => "destructive",
     }
 }
 

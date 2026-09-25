@@ -287,14 +287,14 @@ The help screen is scrollable:
 | `gitrex show <commit>` | Shows commit metadata and its first-parent diff |
 | `gitrex compare <left> <right>` | Compares local refs, their merge base, divergence, and unique commits |
 | `gitrex change-context --base <ref>` | Combines committed changes since a base with the current working tree state |
-| `gitrex checkout <target>` | Checks out an existing branch or ref |
-| `gitrex switch <target>` | Switches to a branch |
-| `gitrex create-branch <name> --from <target>` | Creates a new branch, optionally from another ref |
+| `gitrex checkout <target> [--expect-*] [--format json]` | Checks out an existing branch or ref |
+| `gitrex switch <target> [--dry-run] [--expect-*] [--format json]` | Plans or switches to a branch |
+| `gitrex create-branch <name> [--from <target>] [--dry-run] [--expect-*] [--format json]` | Plans or creates a new branch |
 | `gitrex clone <repository> [directory]` | Clones a repository to an optional destination |
-| `gitrex fetch [remote]` | Explicitly refreshes and prunes remote-tracking refs |
-| `gitrex pull [remote] [branch]` | Pulls updates from a remote and branch |
-| `gitrex push [remote] [branch]` | Pushes commits to a remote and branch |
-| `gitrex cleanup [options]` | Previews merged local branches; requires `--yes` to delete them |
+| `gitrex fetch [remote] [--dry-run] [--expect-*] [--format json]` | Plans or refreshes and prunes remote-tracking refs |
+| `gitrex pull [remote] [branch] [--dry-run] [--expect-*] [--format json]` | Plans or pulls updates from a remote and branch |
+| `gitrex push [remote] [branch] [--dry-run] [--expect-*] [--format json]` | Plans or pushes commits to a remote and branch |
+| `gitrex cleanup [options] [--dry-run] [--expect-*] [--format json]` | Previews merged local branches; requires `--yes` to delete them |
 | `gitrex tui` | Forces the TUI explicitly |
 
 ### Local branch cleanup
@@ -309,6 +309,14 @@ The default base is the current `HEAD`. Use `--base <ref>` to choose another com
 
 Cleanup is based on commit ancestry: a branch tip must be an ancestor of the base commit. A squash merge or rebase can preserve the changes while producing different commit IDs, so those branches may not appear as merged. Git's safe deletion check is repeated for every branch and may still refuse a branch when Git sees unmerged commits.
 
+### Safe mutation plans and receipts
+
+`switch`, `create-branch`, `cleanup`, `fetch`, `pull`, and `push` accept `--dry-run`. These plans use GitRex analysis against local state and do not contact remotes or mutate refs, the index, the worktree, or remote refs. The plan marks this as `planning_source: gitrex_analysis`; `network_access_required` describes the eventual operation, while `network_access_during_planning` is false. `git_provided_dry_run` identifies a plan that actually used Git's dry-run output.
+
+Supported repository mutation commands accept any of `--expect-head <full-sha>`, `--expect-branch <name>`, and `--expect-upstream <ref>`. GitRex checks the supplied values and the planned refs again immediately before invoking Git. A mismatch exits with `PRECONDITION_CHANGED`; JSON error details include expected and observed state, and identify a changed ref when applicable.
+
+Use `--format json` on `checkout`, `switch`, `create-branch`, `cleanup`, `fetch`, `pull`, and `push` to receive an operation plan or receipt through the shared protocol. Receipts report whether Git state changed, before/after identifiers, observed effects, and the verification result. Remote effects are listed as confirmed only when a follow-up remote read observes them. An operation can return `VERIFICATION_FAILED` after Git reports success if its expected postcondition cannot be confirmed.
+
 ### Repository context
 
 These context commands read only local Git state. They never fetch. Reference arguments are resolved to full commit IDs before comparison commands run.
@@ -321,7 +329,7 @@ These context commands read only local Git state. They never fetch. Reference ar
 
 ### Machine-readable protocol
 
-status, branch, log, inspect, diff, show, compare, and change-context keep human-readable output by default, except `change-context` defaults to JSON. Add `--format json` to receive the versioned machine protocol. Context command limits and scope options are supported in both formats. `capabilities` describes the supported commands and can also be printed as JSON:
+status, branch, log, inspect, diff, show, compare, and change-context keep human-readable output by default, except `change-context` defaults to JSON. Add `--format json` to receive the versioned machine protocol. Mutating commands that support `--format` return plans for dry-runs and receipts after execution. Context command limits and scope options are supported in both formats. `capabilities` describes the supported commands and can also be printed as JSON:
 
     gitrex status --format json
     gitrex branch --format json
@@ -361,12 +369,14 @@ The stable data fields are:
 | compare | resolved refs; merge bases; ahead/behind counts; bounded unique commit arrays with counts and truncation flags; path summary |
 | change-context | resolved base and HEAD; merge bases; bounded commits since base; committed diff; working-tree groups and conflicts |
 | capabilities | gitrex_version (string); protocol_schema_version (integer); supported_output_formats (string array); operations (array); authorization (object) |
+| mutation plan | operation identifier; effects and risk class; expected preconditions, their planned state, and the observed state; expected local/remote effects; network requirements; planning source; refs and immutable commit IDs |
+| mutation receipt | operation identifier; state_changed; before/after identifiers; confirmed local/remote effects; verification status and checks |
 
-Each capabilities operation has name (string), effects (array of effect names), and output_formats (string array). The authorization object has granted (boolean, always false) and note (string). Empty collections are returned as empty arrays.
+Each capabilities operation has name (string), legacy effects (array), classification (effects and risk_class), and output_formats (string array). The legacy effects array keeps the protocol-v1 `network_access` value for compatibility. `classification.effects` and `classification.risk_class` use `read_only`, `local_mutation`, `network_read`, `remote_mutation`, and `destructive`. The authorization object has granted (boolean, always false) and note (string). Empty collections are returned as empty arrays.
 
-Effects list every kind of change an operation can perform. For the composite `tui` operation, the list is the union of effects available through its actions, including read-only, local mutation, network access, and remote mutation.
+Classification effects list every kind of change an operation can perform. `risk_class` describes the operation's authorization risk; it does not authorize execution. For the composite `tui` operation, the classification is the union of its available actions, including destructive operations.
 
-Error code is the stable machine identifier. message is a human-readable diagnostic string and may change. retryable is an optional boolean and is omitted when uncertain. Optional details is an object: REFERENCE_NOT_FOUND includes reference (string), COMMAND_FAILED includes command (string) and may include exit_code (integer), and DIVERGED includes ahead and behind (integers). I/O and backend failures share BACKEND_ERROR.
+Error code is the stable machine identifier. message is a human-readable diagnostic string and may change. retryable is an optional boolean and is omitted when uncertain. Optional details is an object: REFERENCE_NOT_FOUND includes reference (string), COMMAND_FAILED includes command (string) and may include exit_code (integer), DIVERGED includes ahead and behind (integers), and PRECONDITION_CHANGED includes expected/observed state plus an optional changed reference. I/O and backend failures share BACKEND_ERROR.
 
 | Code | Meaning |
 | --- | --- |
@@ -375,11 +385,13 @@ Error code is the stable machine identifier. message is a human-readable diagnos
 | REFERENCE_NOT_FOUND | A requested Git reference does not exist |
 | COMMAND_FAILED | A Git command returned a failure status |
 | DIVERGED | A pull cannot fast-forward because local and remote histories diverged |
+| PRECONDITION_CHANGED | Repository state changed from the expected or planned values; no mutation was started |
+| VERIFICATION_FAILED | Git returned successfully, but the expected post-operation state could not be confirmed |
 | BACKEND_ERROR | GitRex or operating-system I/O failed |
 | PARSE_ERROR | GitRex could not parse Git output |
 | INVALID_UTF8 | Git output was not valid UTF-8 |
 
-capabilities includes gitrex_version, protocol_schema_version, supported_output_formats, and an ordered operations array. Each operation lists its name, possible effects, and output_formats. Effects are read_only, local_mutation, network_access, and remote_mutation; a command may have more than one. authorization.granted is always false: discovery describes availability and does not authorize execution.
+capabilities includes gitrex_version, protocol_schema_version, supported_output_formats, and an ordered operations array. Each operation lists its name, legacy effects, classification, and output_formats. The legacy effects are read_only, local_mutation, network_access, and remote_mutation; `classification.effects` adds the precise network-read and destructive classes. authorization.granted is always false: discovery describes availability and does not authorize execution.
 
 Exit status is 0 on success, 1 for a Git operation failure, and 2 for invalid command syntax or option values. JSON operation failures write the envelope to stdout and retain a readable diagnostic on stderr. Clap usage errors remain human-readable.
 

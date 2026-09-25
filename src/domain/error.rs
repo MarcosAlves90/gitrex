@@ -2,6 +2,19 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, GitError>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreconditionChange {
+    pub expected_head: Option<String>,
+    pub expected_branch: Option<String>,
+    pub expected_upstream: Option<String>,
+    pub observed_head: Option<String>,
+    pub observed_branch: Option<String>,
+    pub observed_upstream: Option<String>,
+    pub changed_reference: Option<String>,
+    pub expected_reference_commit_id: Option<String>,
+    pub observed_reference_commit_id: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum GitError {
     #[error("git executable was not found")]
@@ -20,6 +33,10 @@ pub enum GitError {
     ReferenceNotFound(String),
     #[error("pull cannot fast-forward because histories diverged (+{ahead} -{behind})")]
     Diverged { ahead: u32, behind: u32 },
+    #[error("PRECONDITION_CHANGED: repository state no longer matches the expected values")]
+    PreconditionChanged { details: Box<PreconditionChange> },
+    #[error("VERIFICATION_FAILED: {0}")]
+    VerificationFailed(String),
     #[error("git backend error: {0}")]
     Backend(String),
     #[error("failed to parse git output: {0}")]

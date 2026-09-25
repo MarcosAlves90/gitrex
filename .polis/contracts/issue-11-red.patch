@@ -1,0 +1,64 @@
+diff --git a/tests/cli_mutation_red_probe.rs b/tests/cli_mutation_red_probe.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8262a953e3ecd2015118c958f5732920538c77ae
+--- /dev/null
++++ b/tests/cli_mutation_red_probe.rs
+@@ -0,0 +1,58 @@
++use assert_cmd::Command as AssertCommand;
++use serde_json::Value;
++use tempfile::TempDir;
++
++mod support;
++
++use support::{commit_all, configure_user, init_repo, write_file};
++
++#[test]
++fn dry_run_plans_branch_creation_without_mutation() {
++    let temp = TempDir::new().unwrap();
++    let repo = init_repo(temp.path(), "main");
++    configure_user(&repo);
++    write_file(temp.path(), "README.md", "gitrex\n");
++    let head = commit_all(&repo, "initial commit");
++
++    let output = AssertCommand::cargo_bin("gitrex")
++        .unwrap()
++        .current_dir(temp.path())
++        .args([
++            "create-branch",
++            "planned-branch",
++            "--from",
++            "main",
++            "--dry-run",
++            "--format",
++            "json",
++        ])
++        .output()
++        .unwrap();
++
++    assert!(
++        output.status.success(),
++        "dry-run command failed: {}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
++    assert_eq!(response["schema_version"], 1);
++    assert_eq!(response["operation"], "create-branch");
++    assert_eq!(response["ok"], true);
++    assert_eq!(response["data"]["operation"], "create_branch");
++    assert_eq!(response["data"]["risk_class"], "local_mutation");
++    assert_eq!(response["data"]["planning_source"], "gitrex_analysis");
++    assert!(response["data"]["expected_local_effects"]
++        .as_array()
++        .is_some_and(|effects| !effects.is_empty()));
++    assert!(response["data"]["refs"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .any(|reference| { reference["name"] == "main" && reference["commit_id"] == head }));
++
++    assert!(repo.find_branch("planned-branch").is_err());
++    assert_eq!(
++        repo.head().unwrap().target().as_deref(),
++        Some(head.as_str())
++    );
++}

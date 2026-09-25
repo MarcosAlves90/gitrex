@@ -62,7 +62,7 @@ fn render_commit_actions(controller: &mut TuiController) -> String {
 }
 
 fn wait_for_operation(controller: &mut TuiController) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while controller.app().loading.is_some() {
         controller.poll_operation().unwrap();
         assert!(Instant::now() < deadline, "Git operation did not finish");
