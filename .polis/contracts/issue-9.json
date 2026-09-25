@@ -49,7 +49,7 @@
       },
       {
         "id": "REQ-004",
-        "statement": "Provide deterministic capabilities --format json output with GitRex and schema versions, supported formats, and every CLI operation classified by its read-only, local-mutation, network-access, or remote-mutation effects; discovery must perform no network I/O and must not imply authorization."
+        "statement": "Provide deterministic capabilities --format json output with GitRex and schema versions, supported formats, and every CLI operation classified by all effects it can produce. For composite operations such as tui, report the union of effects reachable through its actions, including read-only, local-mutation, network-access, and remote-mutation where applicable; discovery must perform no network I/O and must not imply authorization."
       },
       {
         "id": "REQ-005",
@@ -77,7 +77,7 @@
       },
       {
         "id": "AC-003",
-        "statement": "Capabilities report package and schema versions, supported output formats, and every operation's effects in deterministic order without invoking Git or the network; output states that capability is descriptive and grants no authorization.",
+        "statement": "Capabilities report package and schema versions, supported output formats, and the full set of effects for every operation in deterministic order without invoking Git or the network. Composite operations such as tui include the union of effects reachable through their actions; output states that capability is descriptive and grants no authorization.",
         "requirements": [
           "REQ-004"
         ],
