@@ -21,6 +21,11 @@
         "output_formats": ["text", "json"]
       },
       {
+        "name": "change-context",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
+      },
+      {
         "name": "checkout",
         "effects": ["local_mutation"],
         "output_formats": ["text"]
@@ -36,14 +41,29 @@
         "output_formats": ["text"]
       },
       {
+        "name": "compare",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
+      },
+      {
         "name": "create-branch",
         "effects": ["local_mutation"],
         "output_formats": ["text"]
       },
       {
+        "name": "diff",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
+      },
+      {
         "name": "fetch",
         "effects": ["local_mutation", "network_access"],
         "output_formats": ["text"]
+      },
+      {
+        "name": "inspect",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
       },
       {
         "name": "log",
@@ -59,6 +79,11 @@
         "name": "push",
         "effects": ["network_access", "remote_mutation"],
         "output_formats": ["text"]
+      },
+      {
+        "name": "show",
+        "effects": ["read_only"],
+        "output_formats": ["text", "json"]
       },
       {
         "name": "status",

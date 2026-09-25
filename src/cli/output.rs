@@ -1,5 +1,10 @@
 use crate::domain::{
-    build_branch_catalog, BranchInfo, CommitSummary, GraphLine, RepoStatus, StatusEntry,
+    build_branch_catalog,
+    repository_context::{
+        ChangeContextReport, CompareReport, ContextCommit, DiffReport, PathGroup,
+        RepositoryContext, ShowReport, WorkingTreeContext,
+    },
+    BranchInfo, CommitSummary, GraphLine, RepoStatus, StatusEntry,
 };
 use ratatui::prelude::{Line, Modifier, Span, Style};
 
@@ -58,6 +63,189 @@ pub fn print_log(entries: &[CommitSummary]) {
             "{} {} {} {}",
             entry.hash, entry.author, entry.date, entry.subject
         );
+    }
+}
+
+pub fn print_inspect(context: &RepositoryContext) {
+    println!("repository: {}", context.repository.name);
+    println!("root: {}", context.repository.root);
+    match (
+        &context.head.branch,
+        &context.head.commit,
+        context.head.detached,
+    ) {
+        (Some(branch), Some(commit), _) => println!("HEAD: {branch} ({commit})"),
+        (Some(branch), None, _) => println!("HEAD: {branch} (unborn)"),
+        (None, Some(commit), true) => println!("HEAD: detached ({commit})"),
+        _ => println!("HEAD: unavailable"),
+    }
+    if let Some(upstream) = &context.upstream {
+        println!(
+            "upstream: {} (+{} -{})",
+            upstream.reference, upstream.ahead, upstream.behind
+        );
+    }
+    println!(
+        "working tree: {}",
+        if context.working_tree.clean {
+            "clean"
+        } else {
+            "changes"
+        }
+    );
+    print_working_tree(&context.working_tree);
+    if context.conflicts.has_conflicts {
+        println!("conflicts: {}", context.conflicts.count);
+        if let Some(paths) = &context.conflicts.paths {
+            for path in paths {
+                println!("  {} {}", path.status, path.path);
+            }
+        }
+        print_truncated(context.conflicts.truncated);
+    }
+    if let Some(branches) = &context.branches {
+        println!("branches: {}", branches.count);
+        for branch in &branches.branches {
+            let marker = if branch.current { "*" } else { " " };
+            println!(
+                "  {marker} {} [{}] {}",
+                branch.name, branch.kind, branch.commit
+            );
+        }
+        print_truncated(branches.truncated);
+    }
+    if let Some(history) = &context.history {
+        println!("history: {} commit(s)", history.count);
+        for commit in &history.commits {
+            print_context_commit(commit);
+        }
+        print_truncated(history.truncated);
+    }
+}
+
+pub fn print_diff(diff: &DiffReport) {
+    println!("diff: {}", diff.mode);
+    if let Some(left) = &diff.left_commit {
+        println!("left: {left}");
+    }
+    if let Some(right) = &diff.right_commit {
+        println!("right: {right}");
+    }
+    println!(
+        "changed files: {} (+{} -{})",
+        diff.changed_file_count, diff.additions, diff.deletions
+    );
+    for file in &diff.changed_files {
+        let stats = match (file.additions, file.deletions) {
+            (Some(additions), Some(deletions)) => format!(" +{additions} -{deletions}"),
+            _ => String::new(),
+        };
+        println!("  {} {}{stats}", file.status, file.path);
+    }
+    print_truncated(diff.changed_files_truncated);
+    if let Some(patch) = &diff.patch {
+        if !patch.text.is_empty() {
+            print!("{}", patch.text);
+            if !patch.text.ends_with('\n') {
+                println!();
+            }
+        }
+        if patch.truncated {
+            println!(
+                "[patch truncated: returned {} of {} bytes]",
+                patch.returned_bytes, patch.total_bytes
+            );
+        }
+    }
+}
+
+pub fn print_show(show: &ShowReport) {
+    println!("commit: {}", show.commit.hash);
+    println!("parents: {}", show.commit.parents.join(", "));
+    println!("author: {}", show.commit.author);
+    println!("date: {}", show.commit.timestamp);
+    println!("subject: {}", show.commit.subject);
+    if !show.commit.body.is_empty() {
+        println!("\n{}", show.commit.body);
+    }
+    print_diff(&show.diff);
+}
+
+pub fn print_compare(compare: &CompareReport) {
+    println!("left: {} ({})", compare.left_reference, compare.left_commit);
+    println!(
+        "right: {} ({})",
+        compare.right_reference, compare.right_commit
+    );
+    println!("merge bases: {}", compare.merge_bases.join(", "));
+    println!("ahead: {}; behind: {}", compare.ahead, compare.behind);
+    println!("left-only commits:");
+    for commit in &compare.left_only_commits {
+        print_context_commit(commit);
+    }
+    print_truncated(compare.left_only_commits_truncated);
+    println!("right-only commits:");
+    for commit in &compare.right_only_commits {
+        print_context_commit(commit);
+    }
+    print_truncated(compare.right_only_commits_truncated);
+    print_diff(&compare.diff);
+}
+
+pub fn print_change_context(context: &ChangeContextReport) {
+    println!("base: {} ({})", context.base.reference, context.base.commit);
+    println!("HEAD: {}", context.head.commit);
+    println!("merge bases: {}", context.merge_bases.join(", "));
+    println!("commits since base: {}", context.commits.count);
+    for commit in &context.commits.commits {
+        print_context_commit(commit);
+    }
+    print_truncated(context.commits.truncated);
+    print_diff(&context.diff);
+    print_working_tree(&context.working_tree);
+    if context.conflicts.has_conflicts {
+        println!("conflicts: {}", context.conflicts.count);
+        if let Some(paths) = &context.conflicts.paths {
+            for path in paths {
+                println!("  {} {}", path.status, path.path);
+            }
+        }
+        print_truncated(context.conflicts.truncated);
+    }
+}
+
+fn print_working_tree(working_tree: &WorkingTreeContext) {
+    print_path_group("staged", &working_tree.staged);
+    print_path_group("unstaged", &working_tree.unstaged);
+    println!("untracked: {}", working_tree.untracked.count);
+    if let Some(paths) = &working_tree.untracked.paths {
+        for path in paths {
+            println!("  {}", path.path);
+        }
+    }
+    print_truncated(working_tree.untracked.truncated);
+}
+
+fn print_path_group(name: &str, group: &PathGroup) {
+    println!("{name}: {}", group.count);
+    if let Some(paths) = &group.paths {
+        for path in paths {
+            println!("  {} {}", path.status, path.path);
+        }
+    }
+    print_truncated(group.truncated);
+}
+
+fn print_context_commit(commit: &ContextCommit) {
+    println!(
+        "  {} {} {} {}",
+        commit.hash, commit.author, commit.date, commit.subject
+    );
+}
+
+fn print_truncated(truncated: bool) {
+    if truncated {
+        println!("  [output truncated; raise the corresponding limit to see more]");
     }
 }
 

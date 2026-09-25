@@ -15,6 +15,25 @@ pub enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InspectScopeArg {
+    Minimal,
+    Change,
+    Branches,
+    Full,
+}
+
+impl From<InspectScopeArg> for crate::domain::repository_context::InspectScope {
+    fn from(scope: InspectScopeArg) -> Self {
+        match scope {
+            InspectScopeArg::Minimal => Self::Minimal,
+            InspectScopeArg::Change => Self::Change,
+            InspectScopeArg::Branches => Self::Branches,
+            InspectScopeArg::Full => Self::Full,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
     Status {
@@ -29,6 +48,72 @@ pub enum Commands {
         #[arg(short, long, default_value_t = 20)]
         limit: usize,
         #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+    #[command(about = "Inspect local repository state and bounded context")]
+    Inspect {
+        #[arg(long, value_enum, default_value = "full")]
+        scope: InspectScopeArg,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_PATHS)]
+        max_paths: usize,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_HISTORY_LIMIT)]
+        history_limit: usize,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_BRANCHES)]
+        max_branches: usize,
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+    #[command(about = "Show changed paths and an optional bounded patch")]
+    Diff {
+        #[arg(long, conflicts_with_all = ["base", "from", "to"])]
+        staged: bool,
+        #[arg(long, conflicts_with_all = ["staged", "from", "to"])]
+        base: Option<String>,
+        #[arg(long, requires = "to", conflicts_with_all = ["staged", "base"])]
+        from: Option<String>,
+        #[arg(long, requires = "from", conflicts_with_all = ["staged", "base"])]
+        to: Option<String>,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_PATHS)]
+        max_paths: usize,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_PATCH_BYTES)]
+        max_patch_bytes: usize,
+        #[arg(long, help = "Include patch text in JSON output")]
+        include_patch: bool,
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+    #[command(about = "Show commit metadata and its first-parent diff")]
+    Show {
+        commit: String,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_PATHS)]
+        max_paths: usize,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_PATCH_BYTES)]
+        max_patch_bytes: usize,
+        #[arg(long, help = "Include patch text in JSON output")]
+        include_patch: bool,
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+    #[command(about = "Compare two local commits or refs")]
+    Compare {
+        left: String,
+        right: String,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_PATHS)]
+        max_paths: usize,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_COMMITS)]
+        max_commits: usize,
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+    #[command(about = "Build a bounded view of changes since a base ref")]
+    ChangeContext {
+        #[arg(long, required = true)]
+        base: String,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_PATHS)]
+        max_paths: usize,
+        #[arg(long, default_value_t = crate::app::repository_context::DEFAULT_MAX_COMMITS)]
+        max_commits: usize,
+        #[arg(long, value_enum, default_value = "json")]
         format: OutputFormat,
     },
     Capabilities {

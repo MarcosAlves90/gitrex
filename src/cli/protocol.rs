@@ -4,7 +4,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::domain::{
-    BranchInfo, BranchKind as DomainBranchKind, CommitSummary, GitError, RepoStatus, StatusEntry,
+    repository_context as domain_context, BranchInfo, BranchKind as DomainBranchKind,
+    CommitSummary, GitError, RepoStatus, StatusEntry,
 };
 
 pub(crate) const PROTOCOL_SCHEMA_VERSION: u32 = 1;
@@ -231,6 +232,401 @@ impl From<Vec<CommitSummary>> for LogData {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct InspectData {
+    scope: String,
+    repository: RepositoryIdentityData,
+    head: HeadData,
+    upstream: Option<UpstreamData>,
+    working_tree: WorkingTreeData,
+    conflicts: ConflictData,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branches: Option<BranchListData>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history: Option<CommitListData>,
+}
+
+#[derive(Debug, Serialize)]
+struct RepositoryIdentityData {
+    root: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct HeadData {
+    commit: Option<String>,
+    branch: Option<String>,
+    detached: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct UpstreamData {
+    reference: String,
+    commit: Option<String>,
+    ahead: u64,
+    behind: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextPathData {
+    path: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PathGroupData {
+    count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paths: Option<Vec<ContextPathData>>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct UntrackedPathGroupData {
+    count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paths: Option<Vec<String>>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkingTreeData {
+    clean: bool,
+    staged: PathGroupData,
+    unstaged: PathGroupData,
+    untracked: UntrackedPathGroupData,
+}
+
+#[derive(Debug, Serialize)]
+struct ConflictData {
+    has_conflicts: bool,
+    count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    paths: Option<Vec<ContextPathData>>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct BranchListData {
+    count: usize,
+    branches: Vec<ContextBranchData>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ContextBranchData {
+    name: String,
+    current: bool,
+    upstream: Option<String>,
+    commit: String,
+    subject: String,
+    kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CommitListData {
+    count: usize,
+    commits: Vec<Commit>,
+    truncated: bool,
+}
+
+impl From<domain_context::RepositoryContext> for InspectData {
+    fn from(context: domain_context::RepositoryContext) -> Self {
+        Self {
+            scope: context.scope,
+            repository: RepositoryIdentityData {
+                root: context.repository.root,
+                name: context.repository.name,
+            },
+            head: HeadData {
+                commit: context.head.commit,
+                branch: context.head.branch,
+                detached: context.head.detached,
+            },
+            upstream: context.upstream.map(|upstream| UpstreamData {
+                reference: upstream.reference,
+                commit: upstream.commit,
+                ahead: upstream.ahead,
+                behind: upstream.behind,
+            }),
+            working_tree: WorkingTreeData::from(context.working_tree),
+            conflicts: ConflictData::from(context.conflicts),
+            branches: context.branches.map(BranchListData::from),
+            history: context.history.map(CommitListData::from),
+        }
+    }
+}
+
+impl From<domain_context::WorkingTreeContext> for WorkingTreeData {
+    fn from(working_tree: domain_context::WorkingTreeContext) -> Self {
+        Self {
+            clean: working_tree.clean,
+            staged: PathGroupData::from(working_tree.staged),
+            unstaged: PathGroupData::from(working_tree.unstaged),
+            untracked: UntrackedPathGroupData {
+                count: working_tree.untracked.count,
+                paths: working_tree
+                    .untracked
+                    .paths
+                    .map(|paths| paths.into_iter().map(|path| path.path).collect()),
+                truncated: working_tree.untracked.truncated,
+            },
+        }
+    }
+}
+
+impl From<domain_context::PathGroup> for PathGroupData {
+    fn from(group: domain_context::PathGroup) -> Self {
+        Self {
+            count: group.count,
+            paths: group
+                .paths
+                .map(|paths| paths.into_iter().map(ContextPathData::from).collect()),
+            truncated: group.truncated,
+        }
+    }
+}
+
+impl From<domain_context::ContextPath> for ContextPathData {
+    fn from(path: domain_context::ContextPath) -> Self {
+        Self {
+            path: path.path,
+            status: path.status,
+        }
+    }
+}
+
+impl From<domain_context::ConflictContext> for ConflictData {
+    fn from(conflicts: domain_context::ConflictContext) -> Self {
+        Self {
+            has_conflicts: conflicts.has_conflicts,
+            count: conflicts.count,
+            paths: conflicts
+                .paths
+                .map(|paths| paths.into_iter().map(ContextPathData::from).collect()),
+            truncated: conflicts.truncated,
+        }
+    }
+}
+
+impl From<domain_context::BranchList> for BranchListData {
+    fn from(branches: domain_context::BranchList) -> Self {
+        Self {
+            count: branches.count,
+            branches: branches
+                .branches
+                .into_iter()
+                .map(|branch| ContextBranchData {
+                    name: branch.name,
+                    current: branch.current,
+                    upstream: branch.upstream,
+                    commit: branch.commit,
+                    subject: branch.subject,
+                    kind: branch.kind,
+                })
+                .collect(),
+            truncated: branches.truncated,
+        }
+    }
+}
+
+impl From<domain_context::CommitList> for CommitListData {
+    fn from(commits: domain_context::CommitList) -> Self {
+        Self {
+            count: commits.count,
+            commits: commits.commits.into_iter().map(Commit::from).collect(),
+            truncated: commits.truncated,
+        }
+    }
+}
+
+impl From<domain_context::ContextCommit> for Commit {
+    fn from(commit: domain_context::ContextCommit) -> Self {
+        Self {
+            hash: commit.hash,
+            author: commit.author,
+            date: commit.date,
+            subject: commit.subject,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct DiffData {
+    mode: String,
+    left_commit: Option<String>,
+    right_commit: Option<String>,
+    changed_files: Vec<ChangedFileData>,
+    changed_file_count: usize,
+    changed_files_truncated: bool,
+    additions: u64,
+    deletions: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<PatchData>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChangedFileData {
+    path: String,
+    status: String,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct PatchData {
+    text: String,
+    returned_bytes: usize,
+    total_bytes: u64,
+    truncated: bool,
+}
+
+impl From<domain_context::DiffReport> for DiffData {
+    fn from(diff: domain_context::DiffReport) -> Self {
+        Self {
+            mode: diff.mode,
+            left_commit: diff.left_commit,
+            right_commit: diff.right_commit,
+            changed_files: diff
+                .changed_files
+                .into_iter()
+                .map(|file| ChangedFileData {
+                    path: file.path,
+                    status: file.status,
+                    additions: file.additions,
+                    deletions: file.deletions,
+                })
+                .collect(),
+            changed_file_count: diff.changed_file_count,
+            changed_files_truncated: diff.changed_files_truncated,
+            additions: diff.additions,
+            deletions: diff.deletions,
+            patch: diff.patch.map(|patch| PatchData {
+                text: patch.text,
+                returned_bytes: patch.returned_bytes,
+                total_bytes: patch.total_bytes,
+                truncated: patch.truncated,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ShowData {
+    commit: CommitDetailsData,
+    diff: DiffData,
+}
+
+#[derive(Debug, Serialize)]
+struct CommitDetailsData {
+    hash: String,
+    parents: Vec<String>,
+    author: String,
+    timestamp: String,
+    subject: String,
+    body: String,
+}
+
+impl From<domain_context::ShowReport> for ShowData {
+    fn from(show: domain_context::ShowReport) -> Self {
+        Self {
+            commit: CommitDetailsData {
+                hash: show.commit.hash,
+                parents: show.commit.parents,
+                author: show.commit.author,
+                timestamp: show.commit.timestamp,
+                subject: show.commit.subject,
+                body: show.commit.body,
+            },
+            diff: DiffData::from(show.diff),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CompareData {
+    left_reference: String,
+    left_commit: String,
+    right_reference: String,
+    right_commit: String,
+    merge_bases: Vec<String>,
+    ahead: u64,
+    behind: u64,
+    left_only_commits: Vec<Commit>,
+    left_only_commit_count: u64,
+    left_only_commits_truncated: bool,
+    right_only_commits: Vec<Commit>,
+    right_only_commit_count: u64,
+    right_only_commits_truncated: bool,
+    diff: DiffData,
+}
+
+impl From<domain_context::CompareReport> for CompareData {
+    fn from(compare: domain_context::CompareReport) -> Self {
+        Self {
+            left_reference: compare.left_reference,
+            left_commit: compare.left_commit,
+            right_reference: compare.right_reference,
+            right_commit: compare.right_commit,
+            merge_bases: compare.merge_bases,
+            ahead: compare.ahead,
+            behind: compare.behind,
+            left_only_commits: compare
+                .left_only_commits
+                .into_iter()
+                .map(Commit::from)
+                .collect(),
+            left_only_commit_count: compare.left_only_commit_count,
+            left_only_commits_truncated: compare.left_only_commits_truncated,
+            right_only_commits: compare
+                .right_only_commits
+                .into_iter()
+                .map(Commit::from)
+                .collect(),
+            right_only_commit_count: compare.right_only_commit_count,
+            right_only_commits_truncated: compare.right_only_commits_truncated,
+            diff: DiffData::from(compare.diff),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ChangeContextData {
+    base: CommitReferenceData,
+    head: CommitReferenceData,
+    merge_bases: Vec<String>,
+    commits: CommitListData,
+    diff: DiffData,
+    working_tree: WorkingTreeData,
+    conflicts: ConflictData,
+}
+
+#[derive(Debug, Serialize)]
+struct CommitReferenceData {
+    reference: String,
+    commit: String,
+}
+
+impl From<domain_context::ChangeContextReport> for ChangeContextData {
+    fn from(context: domain_context::ChangeContextReport) -> Self {
+        Self {
+            base: CommitReferenceData {
+                reference: context.base.reference,
+                commit: context.base.commit,
+            },
+            head: CommitReferenceData {
+                reference: context.head.reference,
+                commit: context.head.commit,
+            },
+            merge_bases: context.merge_bases,
+            commits: CommitListData::from(context.commits),
+            diff: DiffData::from(context.diff),
+            working_tree: WorkingTreeData::from(context.working_tree),
+            conflicts: ConflictData::from(context.conflicts),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct CapabilitiesData {
     gitrex_version: &'static str,
     protocol_schema_version: u32,
@@ -285,6 +681,11 @@ pub(crate) fn capabilities() -> CapabilitiesData {
             output_formats: TEXT_JSON,
         },
         Operation {
+            name: "change-context",
+            effects: READ,
+            output_formats: TEXT_JSON,
+        },
+        Operation {
             name: "checkout",
             effects: LOCAL,
             output_formats: TEXT,
@@ -300,14 +701,29 @@ pub(crate) fn capabilities() -> CapabilitiesData {
             output_formats: TEXT,
         },
         Operation {
+            name: "compare",
+            effects: READ,
+            output_formats: TEXT_JSON,
+        },
+        Operation {
             name: "create-branch",
             effects: LOCAL,
             output_formats: TEXT,
         },
         Operation {
+            name: "diff",
+            effects: READ,
+            output_formats: TEXT_JSON,
+        },
+        Operation {
             name: "fetch",
             effects: LOCAL_NETWORK,
             output_formats: TEXT,
+        },
+        Operation {
+            name: "inspect",
+            effects: READ,
+            output_formats: TEXT_JSON,
         },
         Operation {
             name: "log",
@@ -323,6 +739,11 @@ pub(crate) fn capabilities() -> CapabilitiesData {
             name: "push",
             effects: NETWORK_REMOTE,
             output_formats: TEXT,
+        },
+        Operation {
+            name: "show",
+            effects: READ,
+            output_formats: TEXT_JSON,
         },
         Operation {
             name: "status",

@@ -1,3 +1,4 @@
+pub(crate) mod repository_context;
 pub mod router;
 pub mod startup;
 

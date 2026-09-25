@@ -282,6 +282,11 @@ The help screen is scrollable:
 | `gitrex status` | Prints the current branch, upstream, divergence, and working tree state |
 | `gitrex branch` | Lists remote branches grouped by remote and local branches with sync status |
 | `gitrex log --limit <n>` | Shows recent commits from the current branch history, defaulting to 20 |
+| `gitrex inspect [--scope minimal|change|branches|full]` | Reports bounded local repository context; defaults to `full` |
+| `gitrex diff [--staged | --base <ref> | --from <ref> --to <ref>]` | Lists changed files and prints a bounded patch |
+| `gitrex show <commit>` | Shows commit metadata and its first-parent diff |
+| `gitrex compare <left> <right>` | Compares local refs, their merge base, divergence, and unique commits |
+| `gitrex change-context --base <ref>` | Combines committed changes since a base with the current working tree state |
 | `gitrex checkout <target>` | Checks out an existing branch or ref |
 | `gitrex switch <target>` | Switches to a branch |
 | `gitrex create-branch <name> --from <target>` | Creates a new branch, optionally from another ref |
@@ -304,13 +309,28 @@ The default base is the current `HEAD`. Use `--base <ref>` to choose another com
 
 Cleanup is based on commit ancestry: a branch tip must be an ancestor of the base commit. A squash merge or rebase can preserve the changes while producing different commit IDs, so those branches may not appear as merged. Git's safe deletion check is repeated for every branch and may still refuse a branch when Git sees unmerged commits.
 
+### Repository context
+
+These context commands read only local Git state. They never fetch. Reference arguments are resolved to full commit IDs before comparison commands run.
+
+`inspect` defaults to `--scope full`. `minimal` returns repository identity, HEAD, upstream divergence, working-tree counts, and conflict state without path lists, branch refs, or history. `change` adds staged, unstaged, untracked, and conflict paths. `branches` adds local and remote refs without path lists or history. `full` includes both path lists and branch refs plus recent history. Path lists default to 100 entries per group (`--max-paths`); branch lists default to 100 (`--max-branches`); history defaults to 20 commits (`--history-limit`). Each list reports its total count and whether the displayed list was truncated.
+
+`diff` with no mode follows Git's default and shows unstaged tracked changes. `--staged` compares the index with `HEAD`; `--base <ref>` compares the base with the current worktree, including staged and unstaged tracked changes; and `--from <ref> --to <ref>` compares two commits. Text output includes a patch. JSON output includes patch text only with `--include-patch`. Patches default to 64 KiB and can be raised to 1 MiB with `--max-patch-bytes`; the output reports returned and total bytes and an explicit truncation flag. Changed paths default to 100 entries and can be adjusted with `--max-paths`.
+
+`show <commit>` uses the first parent as the comparison point for merge commits. `compare <left> <right>` reports commits unique to the left as `ahead` and commits unique to the right as `behind`; its path summary compares left to right. `change-context --base <ref>` reports commits and file changes from the base to `HEAD`, then reports staged, unstaged, untracked, and conflict state separately. Commit lists default to 20 entries and can be adjusted with `--max-commits`.
+
 ### Machine-readable protocol
 
-status, branch, and log keep their human-readable output by default. Add --format json to receive the versioned machine protocol. capabilities describes the supported commands and can also be printed as JSON:
+status, branch, log, inspect, diff, show, compare, and change-context keep human-readable output by default, except `change-context` defaults to JSON. Add `--format json` to receive the versioned machine protocol. Context command limits and scope options are supported in both formats. `capabilities` describes the supported commands and can also be printed as JSON:
 
     gitrex status --format json
     gitrex branch --format json
     gitrex log --limit 5 --format json
+    gitrex inspect --scope minimal --format json
+    gitrex diff --base main --format json
+    gitrex show HEAD --format json
+    gitrex compare main feature --format json
+    gitrex change-context --base main
     gitrex capabilities --format json
 
 Every protocol response has schema_version (integer), operation (command name string), and ok (boolean). A successful response contains data; a failed response contains error; warnings is an optional array of strings. The envelope fields that do not apply are omitted.
@@ -335,6 +355,11 @@ The stable data fields are:
 | status | branch_name: string; upstream: string or null; ahead and behind: integers; files: array of objects with code and path strings |
 | branch | branches: array of objects with name (string), current (boolean), upstream (string or null), commit (string), subject (string), and kind (local or remote) |
 | log | commits: array of objects with hash, author, date (YYYY-MM-DD), and subject, all strings |
+| inspect | scope; repository identity; HEAD; optional upstream; working-tree groups with counts and optional paths; conflict summary; optional bounded branches and history |
+| diff | mode; resolved left/right commit IDs where applicable; changed paths and available line statistics; counts; truncation flags; optional bounded patch |
+| show | full commit identity, parents, author timestamp, subject and body, plus changed paths, statistics, and optional patch |
+| compare | resolved refs; merge bases; ahead/behind counts; bounded unique commit arrays with counts and truncation flags; path summary |
+| change-context | resolved base and HEAD; merge bases; bounded commits since base; committed diff; working-tree groups and conflicts |
 | capabilities | gitrex_version (string); protocol_schema_version (integer); supported_output_formats (string array); operations (array); authorization (object) |
 
 Each capabilities operation has name (string), effects (array of effect names), and output_formats (string array). The authorization object has granted (boolean, always false) and note (string). Empty collections are returned as empty arrays.

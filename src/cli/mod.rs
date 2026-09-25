@@ -2,6 +2,9 @@ mod args;
 pub mod output;
 pub(crate) mod protocol;
 
+use crate::app::repository_context::{
+    self as context_ops, ContextLimits, DiffOptions, DiffSelection,
+};
 use crate::domain::branch::{BranchCleanupOutcome, BranchCleanupState};
 use crate::git::GitClient;
 
@@ -29,6 +32,126 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
             "log",
             protocol::LogData::from,
             |entries| output::print_log(entries),
+        ),
+        Some(Commands::Inspect {
+            scope,
+            max_paths,
+            history_limit,
+            max_branches,
+            format,
+        }) => {
+            let limits = ContextLimits {
+                max_paths,
+                history_limit,
+                max_branches,
+                ..ContextLimits::default()
+            };
+            execute_read_only(
+                context_ops::inspect(&client, scope.into(), limits),
+                format,
+                "inspect",
+                protocol::InspectData::from,
+                output::print_inspect,
+            )
+        }
+        Some(Commands::Diff {
+            staged,
+            base,
+            from,
+            to,
+            max_paths,
+            max_patch_bytes,
+            include_patch,
+            format,
+        }) => {
+            let selection = match (staged, base, from, to) {
+                (true, _, _, _) => DiffSelection::Staged,
+                (false, Some(base), _, _) => DiffSelection::Base(base),
+                (false, None, Some(from), Some(to)) => DiffSelection::Refs { from, to },
+                _ => DiffSelection::Worktree,
+            };
+            execute_read_only(
+                context_ops::diff(
+                    &client,
+                    DiffOptions {
+                        selection,
+                        limits: ContextLimits {
+                            max_paths,
+                            max_patch_bytes,
+                            ..ContextLimits::default()
+                        },
+                        include_patch: include_patch || format == OutputFormat::Text,
+                    },
+                ),
+                format,
+                "diff",
+                protocol::DiffData::from,
+                output::print_diff,
+            )
+        }
+        Some(Commands::Show {
+            commit,
+            max_paths,
+            max_patch_bytes,
+            include_patch,
+            format,
+        }) => execute_read_only(
+            context_ops::show(
+                &client,
+                &commit,
+                ContextLimits {
+                    max_paths,
+                    max_patch_bytes,
+                    ..ContextLimits::default()
+                },
+                include_patch || format == OutputFormat::Text,
+            ),
+            format,
+            "show",
+            protocol::ShowData::from,
+            output::print_show,
+        ),
+        Some(Commands::Compare {
+            left,
+            right,
+            max_paths,
+            max_commits,
+            format,
+        }) => execute_read_only(
+            context_ops::compare(
+                &client,
+                &left,
+                &right,
+                ContextLimits {
+                    max_paths,
+                    max_commits,
+                    ..ContextLimits::default()
+                },
+            ),
+            format,
+            "compare",
+            protocol::CompareData::from,
+            output::print_compare,
+        ),
+        Some(Commands::ChangeContext {
+            base,
+            max_paths,
+            max_commits,
+            format,
+        }) => execute_read_only(
+            context_ops::change_context(
+                &client,
+                &base,
+                ContextLimits {
+                    max_paths,
+                    max_commits,
+                    ..ContextLimits::default()
+                },
+            ),
+            format,
+            "change-context",
+            protocol::ChangeContextData::from,
+            output::print_change_context,
         ),
         Some(Commands::Capabilities { format }) => {
             let capabilities = protocol::capabilities();

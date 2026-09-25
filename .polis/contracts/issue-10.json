@@ -1,0 +1,112 @@
+{
+  "schema_version": 3,
+  "kind": "feature",
+  "scope": {
+    "allowed_paths": [
+      ".polis/contracts/issue-10.json",
+      "README.md",
+      "src/app/mod.rs",
+      "src/app/repository_context.rs",
+      "src/cli/args.rs",
+      "src/cli/mod.rs",
+      "src/cli/output.rs",
+      "src/cli/protocol.rs",
+      "src/domain/mod.rs",
+      "src/domain/repository_context.rs",
+      "src/git/mod.rs",
+      "src/git/process.rs",
+      "tests/cli_context.rs",
+      "tests/cli_protocol.rs",
+      "tests/fixtures/protocol/v1/capabilities.json"
+    ]
+  },
+  "test_scope": {
+    "allowed_paths": [
+      "src/cli/args.rs",
+      "src/cli/protocol.rs",
+      "src/domain/repository_context.rs",
+      "src/git/process.rs",
+      "tests/cli_context.rs",
+      "tests/cli_protocol.rs",
+      "tests/fixtures/protocol/v1/capabilities.json"
+    ]
+  },
+  "development_method": "strict_sdd_tdd_v1",
+  "specification": {
+    "objective": "Provide deterministic, bounded, read-only GitRex repository context through inspect, diff, show, compare, and change-context operations using shared typed application logic.",
+    "requirements": [
+      {"id":"REQ-001","statement":"Provide gitrex inspect with repository identity and root, exact HEAD and branch or detached state, configured upstream and ahead/behind counts, staged/unstaged/untracked paths, conflict state, local and remote-tracking branch metadata, and bounded recent history."},
+      {"id":"REQ-002","statement":"Provide inspect scopes minimal, change, branches, and full with deterministic documented contents; minimize path and history data in minimal scope, use full as the bounded default, and never fetch implicitly."},
+      {"id":"REQ-003","statement":"Provide gitrex diff for worktree, staged, base-ref, and from/to-ref comparisons; report changed paths and additions/deletions where available; support text patches and structured JSON metadata; bound output and explicitly report truncation."},
+      {"id":"REQ-004","statement":"Provide gitrex show <commit> with resolved full hash, parent hashes, author, timestamp, subject, body, changed-file metadata, and bounded patch output."},
+      {"id":"REQ-005","statement":"Provide read-only gitrex compare <left> <right> resolving both inputs to immutable commit OIDs and returning merge bases, left/right unique commit counts and bounded lists, and changed-file metadata."},
+      {"id":"REQ-006","statement":"Provide gitrex change-context --base <ref> combining resolved base and HEAD OIDs, merge-base and introduced commits, changed-file metadata, current staged/unstaged/untracked state, and conflicts by reusing shared inspect, diff, and compare operations."},
+      {"id":"REQ-007","statement":"Expose all new commands through the existing schema-v1 JSON envelope and deterministic capabilities list, preserve human-readable defaults, and retain existing CLI and TUI behavior."},
+      {"id":"REQ-008","statement":"All new operations are read-only, use local Git state only, and do not mutate refs, index, or worktree or perform network access."},
+      {"id":"REQ-009","statement":"Resolve user-supplied refs safely before passing immutable OIDs as Git revisions, and return stable structured CLI failures for invalid refs and repository state."},
+      {"id":"REQ-010","statement":"Bound large path, history, commit, and patch output with stable defaults and explicit truncation indicators; avoid buffering the complete patch in memory."}
+    ],
+    "acceptance_criteria": [
+      {"id":"AC-001","statement":"Inspect reports identity, root, HEAD/branch/detached state, upstream divergence, staged/unstaged/untracked paths, conflict state, refs, and bounded history in text and versioned JSON without fetching.","requirements":["REQ-001","REQ-007","REQ-008"],"proof":"regression"},
+      {"id":"AC-002","statement":"All four inspect scopes have documented deterministic field sets; minimal omits token-heavy lists and history, full is the bounded default, and scopes remain local-only.","requirements":["REQ-002","REQ-010"],"proof":"regression"},
+      {"id":"AC-003","statement":"Diff supports working-tree, staged, base-ref, and from/to-ref modes; reports changed-path status and available statistics; emits bounded text patches or structured JSON and clearly reports every truncation.","requirements":["REQ-003","REQ-009","REQ-010"],"proof":"regression"},
+      {"id":"AC-004","statement":"Show resolves a commit safely and returns its full identity, parents, author/date, subject/body, changed-file metadata, and bounded patch in text and versioned JSON.","requirements":["REQ-004","REQ-007","REQ-009","REQ-010"],"proof":"regression"},
+      {"id":"AC-005","statement":"Compare resolves both refs to OIDs and reports merge bases, exact ahead/behind counts, bounded unique commit lists, and changed paths in versioned JSON without side effects or network access.","requirements":["REQ-005","REQ-007","REQ-008","REQ-009","REQ-010"],"proof":"regression"},
+      {"id":"AC-006","statement":"Change-context resolves base and HEAD, reports merge base and introduced commits, changed-file metadata, uncommitted status and conflicts, reuses shared operations, and emits versioned JSON without network access.","requirements":["REQ-006","REQ-007","REQ-008","REQ-009","REQ-010"],"proof":"regression"},
+      {"id":"AC-007","statement":"Capabilities classifies inspect, diff, show, compare, and change-context as read-only and lists their supported output formats; existing human defaults and TUI workflows remain supported.","requirements":["REQ-007","REQ-008"],"proof":"regression"}
+    ],
+    "invariants": [
+      {"id":"INV-001","statement":"Public JSON response DTOs remain independent from internal Git and domain representations and use the existing schema-v1 envelope."},
+      {"id":"INV-002","statement":"Each supplied reference is resolved once to an immutable commit ID before it is used in a subsequent Git revision command."},
+      {"id":"INV-003","statement":"All public lists are deterministically ordered and all truncated collections expose their full count and a truncation flag."},
+      {"id":"INV-004","statement":"Read-only context commands never fetch, mutate refs, update the index, or modify worktree files."},
+      {"id":"INV-005","statement":"Patch capture retains at most the configured byte limit plus a small detection buffer while draining the Git subprocess output."}
+    ],
+    "forbidden_states": [
+      {"id":"FORBID-001","statement":"A user-supplied ref is interpolated into a shell command or passed to Git as an option."},
+      {"id":"FORBID-002","statement":"A patch or path list is silently truncated or an operation fetches to fill missing remote-tracking state."},
+      {"id":"FORBID-003","statement":"New JSON output serializes internal structs directly or changes the existing schema version."},
+      {"id":"FORBID-004","statement":"Inspect and change-context duplicate Git parsing or diff behavior instead of reusing shared operations."}
+    ],
+    "inputs": [
+      {"id":"IN-001","statement":"An invocation of inspect with an optional scope and bounded result limits."},
+      {"id":"IN-002","statement":"A diff mode selecting worktree, staged, one base ref, or a from/to ref pair, plus optional output limits and format."},
+      {"id":"IN-003","statement":"A commit-ish for show or two commit-ish references for compare."},
+      {"id":"IN-004","statement":"A base ref for change-context."}
+    ],
+    "outputs": [
+      {"id":"OUT-001","statement":"Deterministic text summaries and versioned JSON envelopes with explicit OIDs, counts, sorted records, and truncation metadata."},
+      {"id":"OUT-002","statement":"A bounded patch string for text output and optional JSON inclusion, with returned and total byte counts."},
+      {"id":"OUT-003","statement":"Stable error envelopes and nonzero exit codes for invalid repository state or references in JSON mode."}
+    ],
+    "failure_semantics": [
+      {"id":"FAIL-001","statement":"Invalid refs return the existing REFERENCE_NOT_FOUND protocol error before any dependent Git operation."},
+      {"id":"FAIL-002","statement":"Git output parse and UTF-8 errors use the existing stable protocol codes and nonzero exit status."},
+      {"id":"FAIL-003","statement":"A repository without HEAD can still be inspected; operations requiring a commit report a structured HEAD/reference failure."},
+      {"id":"FAIL-004","statement":"Argument validation errors retain Clap's current usage-error behavior."}
+    ]
+  },
+  "behavior": {
+    "argv": ["cargo", "run", "--", "inspect", "--scope", "minimal", "--format", "json"],
+    "cwd": ".",
+    "timeout_seconds": 120,
+    "environment": {"mode":"clean","pass":["PATH","HOME","TMPDIR","TMP","TEMP","SystemRoot","COMSPEC","PATHEXT","USERPROFILE","LOCALAPPDATA"]}
+  },
+  "affected": {
+    "argv": ["cargo", "test", "--all", "--locked"],
+    "cwd": ".",
+    "timeout_seconds": 1200,
+    "environment": {"mode":"clean","pass":["PATH","HOME","TMPDIR","TMP","TEMP","SystemRoot","COMSPEC","PATHEXT","USERPROFILE","LOCALAPPDATA"]}
+  },
+  "regression": {
+    "mode": "red_green",
+    "command": {
+      "argv": ["cargo", "test", "--test", "cli_context", "inspect_returns_versioned_repository_context", "--", "--exact"],
+      "cwd": ".",
+      "timeout_seconds": 1200,
+      "environment": {"mode":"clean","pass":["PATH","HOME","TMPDIR","TMP","TEMP","SystemRoot","COMSPEC","PATHEXT","USERPROFILE","LOCALAPPDATA"]}
+    },
+    "baseline_exit_code": 101,
+    "baseline_output_contains": ["inspect_returns_versioned_repository_context"]
+  }
+}
