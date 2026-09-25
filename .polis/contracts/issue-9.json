@@ -31,7 +31,7 @@
       "tests/fixtures/protocol/v1/status.json"
     ]
   },
-  "development_method": "strict_sdd_tdd_v2",
+  "development_method": "strict_sdd_tdd_v1",
   "specification": {
     "objective": "Establish a versioned machine-readable JSON protocol for GitRex read-only CLI commands and capability discovery while preserving the human interface.",
     "requirements": [
