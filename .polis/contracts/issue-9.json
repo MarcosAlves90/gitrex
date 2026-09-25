@@ -219,7 +219,7 @@
         "--test",
         "cli_protocol",
         "--locked",
-        "machine_protocol_status_matches_v1_fixture"
+        "machine_protocol_capabilities_matches_v1_fixture_without_git"
       ],
       "cwd": ".",
       "timeout_seconds": 1200,
@@ -241,7 +241,7 @@
     },
     "baseline_exit_code": 101,
     "baseline_output_contains": [
-      "machine_protocol_status_matches_v1_fixture"
+      "machine_protocol_capabilities_matches_v1_fixture_without_git"
     ]
   }
 }
