@@ -44,11 +44,11 @@
       },
       {
         "id": "REQ-003",
-        "statement": "Cherry-pick the selected commit only onto an explicitly selected existing local branch; reject a dirty index/worktree before switching; review source and destination before mutation; and leave the destination active after success or conflict."
+        "statement": "Cherry-pick the selected commit only onto an explicitly selected existing local branch; reject a dirty index/worktree before switching; prevent switch or cherry-pick from overwriting colliding ignored/untracked paths; review source and destination before mutation; and leave the destination active after success or a stopped operation."
       },
       {
         "id": "REQ-004",
-        "statement": "After cherry-pick success or any attempted cherry-pick that can alter repository state, refresh the snapshot; identify conflicts and provide continue/abort guidance without automatic recovery, and report refresh failure explicitly."
+        "statement": "After cherry-pick success or any attempted cherry-pick that can alter repository state, refresh the snapshot; classify a conflict only when the index has unmerged entries; for a stopped pick without conflicts provide usable skip/abort guidance, and report refresh failure explicitly."
       },
       {
         "id": "REQ-005",
@@ -56,7 +56,7 @@
       },
       {
         "id": "REQ-006",
-        "statement": "Before reset, revalidate the expected current branch and HEAD OID in the worker; require explicit confirmation for each mode and a distinct additional destructive confirmation for Hard that shows branch, target, mode effects, and dirty-path information."
+        "statement": "Before reset, revalidate the expected current branch and HEAD OID in the worker; require explicit confirmation for each mode and a distinct additional destructive confirmation for Hard that shows branch, target, mode effects, dirty paths, and exact ignored/untracked paths that collide with the target tree; block Hard while collisions remain and recheck them in the worker."
       },
       {
         "id": "REQ-007",
@@ -72,7 +72,11 @@
       },
       {
         "id": "REQ-010",
-        "statement": "Add system-Git and TUI regressions for comparison immutability, cherry-pick success/dirty refusal/conflict refresh, all reset semantics and guards, confirmation/cancel paths, and long result navigation."
+        "statement": "Add system-Git and TUI regressions for comparison immutability, cherry-pick success/dirty refusal/conflict refresh/ignored-path protection/empty-pick recovery, all reset semantics and guards including ignored-path collisions, confirmation/cancel paths, and long result navigation."
+      },
+      {
+        "id": "REQ-011",
+        "statement": "Before Hard reset, identify untracked or ignored paths that collide with tracked paths in the target tree, list the exact paths in the destructive review, block while collisions remain, and recheck immediately before mutation."
       }
     ],
     "acceptance_criteria": [
@@ -90,7 +94,7 @@
       },
       {
         "id": "AC-003",
-        "statement": "A clean cherry-pick applies the source to the selected local destination; dirty or invalid destinations fail before branch movement; a real conflict remains visible with refreshed status and recovery guidance.",
+        "statement": "A clean cherry-pick applies the source to the selected local destination; dirty, invalid, or ignored/untracked-path-colliding destinations fail before branch movement; a real conflict remains visible with refreshed status and recovery guidance.",
         "requirements": ["REQ-003", "REQ-004", "REQ-008"],
         "proof": "regression"
       },
@@ -123,6 +127,18 @@
         "statement": "The existing policy's full tests, Clippy, and at-least-90-percent line coverage pass, alongside formatting and cross-platform CI.",
         "requirements": ["REQ-010"],
         "proof": "regression"
+      },
+      {
+        "id": "AC-009",
+        "statement": "Hard reset review shows exact untracked/ignored paths that collide with the target tree and refuses to run until they are removed or moved; the Git worker repeats the check.",
+        "requirements": ["REQ-006", "REQ-011"],
+        "proof": "regression"
+      },
+      {
+        "id": "AC-010",
+        "statement": "A cherry-pick stopped with CHERRY_PICK_HEAD but no unmerged index entries is not labeled a conflict and gives a usable --skip recovery path.",
+        "requirements": ["REQ-004", "REQ-010"],
+        "proof": "regression"
       }
     ],
     "invariants": [
@@ -134,7 +150,10 @@
       {"id": "INV-006", "statement": "Reset operates only on the current local branch represented by the displayed graph; detached and remote refs cannot authorize it."},
       {"id": "INV-007", "statement": "Soft is the default mode; Hard has a separate explicit confirmation boundary."},
       {"id": "INV-008", "statement": "Git receives references and names through direct argv, never shell interpolation."},
-      {"id": "INV-009", "statement": "No implicit fetch, push, stash, force-push, conflict recovery, or unrelated branch-workflow behavior is introduced."}
+      {"id": "INV-009", "statement": "No implicit fetch, push, stash, force-push, conflict recovery, or unrelated branch-workflow behavior is introduced."},
+      {"id": "INV-010", "statement": "Cherry-pick never switches over an ignored path or applies a source change over a colliding ignored/untracked worktree path."},
+      {"id": "INV-011", "statement": "Hard reset refuses before mutation when an ignored/untracked worktree path overlaps a tracked target-tree path."},
+      {"id": "INV-012", "statement": "CHERRY_PICK_HEAD alone does not classify a stopped cherry-pick as a conflict; conflict requires unmerged index entries."}
     ],
     "forbidden_states": [
       {"id": "FORBID-001", "statement": "A comparison target is executed without successful commit resolution."},
@@ -143,7 +162,9 @@
       {"id": "FORBID-004", "statement": "A displayed non-current, remote, or detached graph ref can reset the current branch."},
       {"id": "FORBID-005", "statement": "A reset proceeds after its expected branch or HEAD changes."},
       {"id": "FORBID-006", "statement": "Hard reset executes after only the ordinary reset confirmation."},
-      {"id": "FORBID-007", "statement": "A conflict is automatically continued, aborted, stashed, or resolved."}
+      {"id": "FORBID-007", "statement": "A conflict is automatically continued, aborted, stashed, or resolved."},
+      {"id": "FORBID-008", "statement": "Cherry-pick or Hard reset overwrites an ignored/untracked path that blocks a tracked destination path."},
+      {"id": "FORBID-009", "statement": "A stopped cherry-pick without unmerged entries is reported as a file conflict or omits --skip guidance."}
     ],
     "inputs": [
       {"id": "IN-001", "statement": "Selected commit OID, comparison commit-ish reference, and an explicitly selected existing local cherry-pick destination."},
@@ -153,7 +174,8 @@
     "outputs": [
       {"id": "OUT-001", "statement": "Bounded, scrollable comparison summary with resolved endpoint identities and no repository mutation."},
       {"id": "OUT-002", "statement": "Cherry-pick success or conflict feedback, recovery guidance, and refreshed repository snapshot when available."},
-      {"id": "OUT-003", "statement": "Reset mode, target, previous/resulting HEAD feedback, and refreshed repository snapshot when available."}
+      {"id": "OUT-003", "statement": "Reset mode, target, previous/resulting HEAD feedback, and refreshed repository snapshot when available."},
+      {"id": "OUT-004", "statement": "Exact untracked/ignored path collisions in Hard reset review and a clear blocked result until the paths no longer obstruct the target tree."}
     ],
     "failure_semantics": [
       {
@@ -175,6 +197,18 @@
       {
         "id": "FAIL-005",
         "statement": "Esc at any input, selection, or confirmation phase cancels without starting the corresponding Git mutation."
+      },
+      {
+        "id": "FAIL-006",
+        "statement": "A cherry-pick refuses before branch movement when an ignored/untracked path collides with the destination tree or source commit changes."
+      },
+      {
+        "id": "FAIL-007",
+        "statement": "Hard reset refuses before mutation and names the colliding untracked/ignored paths; the worker revalidates the collision set after review."
+      },
+      {
+        "id": "FAIL-008",
+        "statement": "A stopped cherry-pick with CHERRY_PICK_HEAD and no unmerged paths is reported as paused without conflicts and includes --skip and --abort guidance."
       }
     ]
   },
@@ -199,7 +233,7 @@
   "regression": {
     "mode": "red_green",
     "command": {
-      "argv": ["cargo", "test", "--lib", "--locked", "commit_action_menu_exposes_new_actions"],
+      "argv": ["cargo", "test", "--lib", "--locked", "safety_regression_"],
       "cwd": ".",
       "timeout_seconds": 1200,
       "environment": {
@@ -208,6 +242,6 @@
       }
     },
     "baseline_exit_code": 101,
-    "baseline_output_contains": ["commit_action_menu_exposes_new_actions"]
+    "baseline_output_contains": ["safety_regression_cherry_pick_ignored_collision", "safety_regression_hard_reset_ignored_collision", "safety_regression_empty_cherry_pick"]
   }
 }
