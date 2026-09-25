@@ -206,15 +206,15 @@ pub fn help_lines(
         bullet(
             "cherry-pick",
             theme::SUCCESS,
-            "choose and review a local destination; the index and worktree, including untracked files, must be clean",
+            "choose and review a local destination; clean index/worktree required; ignored collisions block switch or pick",
         ),
-        example("the destination stays active after an attempt; resolve conflicts, then continue or abort with Git."),
+        example("the destination stays active; resolve real conflicts and continue/abort; skip an already-applied empty pick."),
         bullet(
             "reset",
             theme::WARNING,
             "current local graph branch only; Soft is the default and moves the tip only, Mixed resets the index and keeps files, Hard overwrites tracked paths",
         ),
-        example("each reset needs review; Hard may overwrite obstructing untracked paths and requires a separate destructive y confirmation with scrollable changed paths."),
+        example("each reset needs review; Hard lists and blocks ignored/untracked target collisions and requires a separate destructive y confirmation."),
         Line::from(""),
         section("Cleanup modal"),
         bullet(
@@ -306,13 +306,14 @@ mod tests {
         assert!(copy.contains("Commit actions"));
         assert!(copy.contains("read-only diff stat"));
         assert!(copy.contains("local destination"));
-        assert!(copy.contains("including untracked files"));
+        assert!(copy.contains("clean index/worktree required"));
         assert!(copy.contains("destination stays active"));
-        assert!(copy.contains("continue or abort"));
+        assert!(copy.contains("resolve real conflicts and continue/abort"));
+        assert!(copy.contains("skip an already-applied empty pick"));
         assert!(copy.contains("Soft is the default"));
         assert!(copy.contains("current local graph branch only"));
         assert!(copy.contains("Mixed resets the index and keeps files"));
-        assert!(copy.contains("overwrite obstructing untracked paths"));
+        assert!(copy.contains("lists and blocks ignored/untracked target collisions"));
         assert!(copy.contains("destructive y confirmation"));
     }
 

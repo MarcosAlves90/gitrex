@@ -187,6 +187,7 @@ pub(crate) enum CommitActionFlow {
     HardResetConfirmation {
         review: ResetReview,
         mode: ResetMode,
+        overwrite_blockers: Vec<String>,
         scroll_offset: usize,
         scroll_page_size: usize,
         scroll_max: usize,
@@ -1005,7 +1006,11 @@ impl App {
         }
     }
 
-    pub(crate) fn open_hard_reset_confirmation(&mut self) -> bool {
+    pub(crate) fn open_hard_reset_confirmation(
+        &mut self,
+        dirty_paths: Vec<String>,
+        overwrite_blockers: Vec<String>,
+    ) -> bool {
         let Some(CommitActionFlow::ResetConfirmation { review, mode }) =
             self.commit_action_flow.as_ref()
         else {
@@ -1014,14 +1019,27 @@ impl App {
         if *mode != ResetMode::Hard {
             return false;
         }
+        let mut review = review.clone();
+        review.dirty_paths = dirty_paths;
         self.commit_action_flow = Some(CommitActionFlow::HardResetConfirmation {
-            review: review.clone(),
+            review,
             mode: *mode,
+            overwrite_blockers,
             scroll_offset: 0,
             scroll_page_size: 1,
             scroll_max: 0,
         });
         true
+    }
+
+    pub(crate) fn hard_reset_is_blocked(&self) -> bool {
+        matches!(
+            self.commit_action_flow.as_ref(),
+            Some(CommitActionFlow::HardResetConfirmation {
+                overwrite_blockers,
+                ..
+            }) if !overwrite_blockers.is_empty()
+        )
     }
 
     pub(crate) fn back_to_reset_confirmation(&mut self) {
@@ -2028,6 +2046,7 @@ impl App {
             self.commit_action_flow,
             Some(CommitActionFlow::HardResetConfirmation { .. })
         );
+        let hard_reset_blocked = self.hard_reset_is_blocked();
         let block = Block::default()
             .title(title)
             .title_style(theme::panel_title_style(true, theme::PURPLE))
@@ -2057,7 +2076,9 @@ impl App {
                     .style(theme::panel_surface_style(true)),
                 content_area,
             );
-            let controls = if is_hard_reset {
+            let controls = if hard_reset_blocked {
+                "Hard reset blocked: move/remove listed paths • Esc = back • j/k or PgUp/PgDn scroll"
+            } else if is_hard_reset {
                 "y = confirm destructive reset • Esc = back • j/k or PgUp/PgDn scroll"
             } else {
                 "j/k or arrows scroll • PgUp/PgDn page • Enter/Esc = back"
@@ -2176,7 +2197,12 @@ impl App {
                     "Enter = reset • Esc = back"
                 }
             ),
-            CommitActionFlow::HardResetConfirmation { review, mode, .. } => {
+            CommitActionFlow::HardResetConfirmation {
+                review,
+                mode,
+                overwrite_blockers,
+                ..
+            } => {
                 let dirty_paths = if review.dirty_paths.is_empty() {
                     String::from("- none")
                 } else {
@@ -2187,14 +2213,33 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
+                let blocker_paths = if overwrite_blockers.is_empty() {
+                    String::from("- none")
+                } else {
+                    overwrite_blockers
+                        .iter()
+                        .map(|path| format!("- {path}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                let blocker_status = if overwrite_blockers.is_empty() {
+                    "No ignored/untracked path collisions detected.".to_string()
+                } else {
+                    format!(
+                        "Hard reset blocked until these paths are moved or removed:\n{blocker_paths}"
+                    )
+                };
                 format!(
-                    "Branch: {}\nTarget: {}\nMode: {}\nEffect: {}\nChanged paths ({}):\n{}",
+                    "Branch: {}\nTarget: {}\nMode: {}\nEffect: {}\nChanged paths ({}):\n{}\n\nIgnored/untracked paths colliding with target ({}):\n{}\n\n{}",
                     review.branch,
                     short_oid(&review.target),
                     mode.label(),
                     mode.effect(),
                     review.dirty_paths.len(),
-                    dirty_paths
+                    dirty_paths,
+                    overwrite_blockers.len(),
+                    blocker_paths,
+                    blocker_status
                 )
             }
         };

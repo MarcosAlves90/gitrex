@@ -621,12 +621,7 @@ impl TuiController {
                     .reset_request()
                     .is_some_and(|(_, mode, _, _)| mode == crate::git::ResetMode::Hard)
                 {
-                    if !self.app.open_hard_reset_confirmation() {
-                        self.app.set_feedback(
-                            "Hard reset requires its separate destructive confirmation.",
-                            MessageKind::Warning,
-                        );
-                    }
+                    self.prepare_hard_reset_confirmation()?;
                 } else {
                     self.start_confirmed_reset()?;
                 }
@@ -637,7 +632,14 @@ impl TuiController {
                 Ok(false)
             }
             Intent::ConfirmHardReset => {
-                self.start_confirmed_reset()?;
+                if self.app.hard_reset_is_blocked() {
+                    self.app.set_feedback(
+                        "Hard reset is blocked while ignored/untracked paths collide with the target. Move or remove the listed paths, then reopen the review.",
+                        MessageKind::Warning,
+                    );
+                } else {
+                    self.start_confirmed_reset()?;
+                }
                 Ok(false)
             }
             Intent::ConfirmDeleteBranch => {
@@ -870,6 +872,90 @@ impl TuiController {
         })
     }
 
+    fn prepare_hard_reset_confirmation(&mut self) -> anyhow::Result<()> {
+        let Some((target, mode, expected_branch, expected_head)) = self.app.reset_request() else {
+            self.app.set_feedback(
+                "Review the Hard reset target before continuing.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        };
+        if mode != crate::git::ResetMode::Hard {
+            self.app.set_feedback(
+                "Hard reset requires its separate destructive confirmation.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
+
+        let status = match self.client.status() {
+            Ok(status) => status,
+            Err(error) => {
+                self.app.set_feedback(
+                    format!("Could not refresh status for Hard reset review: {error}"),
+                    MessageKind::Error,
+                );
+                return Ok(());
+            }
+        };
+        if status.branch_name != expected_branch {
+            self.app.set_feedback(
+                format!(
+                    "Current branch changed from {expected_branch} to {}; cancel and reopen reset review.",
+                    status.branch_name
+                ),
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
+        let current_head = match self.client.resolve_commit("HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                self.app.set_feedback(
+                    format!("Could not refresh HEAD for Hard reset review: {error}"),
+                    MessageKind::Error,
+                );
+                return Ok(());
+            }
+        };
+        if current_head != expected_head {
+            self.app.set_feedback(
+                "HEAD changed while reviewing the reset; cancel and reopen reset review.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
+        if status_has_unresolved_conflicts(&status) {
+            self.app.set_feedback(
+                "Resolve the current Git conflicts before confirming a Hard reset.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
+
+        let overwrite_blockers = match self.client.hard_reset_overwrite_paths(&target) {
+            Ok(paths) => paths,
+            Err(error) => {
+                self.app.set_feedback(
+                    format!("Could not inspect Hard reset target paths: {error}"),
+                    MessageKind::Error,
+                );
+                return Ok(());
+            }
+        };
+        let dirty_paths = status.files.into_iter().map(|entry| entry.path).collect();
+        if !self
+            .app
+            .open_hard_reset_confirmation(dirty_paths, overwrite_blockers)
+        {
+            self.app.set_feedback(
+                "Hard reset requires its separate destructive confirmation.",
+                MessageKind::Warning,
+            );
+        }
+        Ok(())
+    }
+
     fn start_confirmed_reset(&mut self) -> anyhow::Result<()> {
         let Some((target, mode, expected_branch, expected_head)) = self.app.reset_request() else {
             self.app.set_feedback(
@@ -878,6 +964,13 @@ impl TuiController {
             );
             return Ok(());
         };
+        if mode == crate::git::ResetMode::Hard && self.app.hard_reset_is_blocked() {
+            self.app.set_feedback(
+                "Hard reset is blocked while ignored/untracked paths collide with the target. Move or remove the listed paths, then reopen the review.",
+                MessageKind::Warning,
+            );
+            return Ok(());
+        }
         self.app.close_commit_actions();
         self.start_operation_request(OperationRequest::Reset {
             target,

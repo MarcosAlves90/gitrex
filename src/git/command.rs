@@ -21,6 +21,7 @@ pub struct CommitComparison {
 pub enum CherryPickStatus {
     Applied,
     Conflict,
+    Stopped,
     Failed,
 }
 
@@ -81,6 +82,45 @@ pub struct ResetResult {
     pub resulting_head: Option<String>,
     pub target_oid: String,
     pub detail: String,
+}
+
+fn nul_paths(output: &[u8]) -> Vec<Vec<u8>> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| path.strip_suffix(b"/").unwrap_or(path).to_vec())
+        .collect()
+}
+
+fn path_is_same_or_parent(parent: &[u8], child: &[u8]) -> bool {
+    child == parent
+        || child
+            .strip_prefix(parent)
+            .is_some_and(|suffix| suffix.first() == Some(&b'/'))
+}
+
+fn paths_overlap_on_filesystem(left: &[u8], right: &[u8]) -> bool {
+    let left = left.strip_suffix(b"/").unwrap_or(left);
+    let right = right.strip_suffix(b"/").unwrap_or(right);
+    if path_is_same_or_parent(left, right) || path_is_same_or_parent(right, left) {
+        return true;
+    }
+
+    if cfg!(any(target_os = "windows", target_os = "macos")) {
+        let left = String::from_utf8_lossy(left).to_lowercase();
+        let right = String::from_utf8_lossy(right).to_lowercase();
+        return path_is_same_or_parent(left.as_bytes(), right.as_bytes())
+            || path_is_same_or_parent(right.as_bytes(), left.as_bytes());
+    }
+
+    false
+}
+
+fn display_git_path(path: &[u8]) -> String {
+    String::from_utf8_lossy(path)
+        .chars()
+        .flat_map(char::escape_default)
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +244,20 @@ impl GitClient {
             ));
         }
 
-        if let Err(error) = self.switch(destination) {
+        let source_collisions = self.untracked_paths_overlapping_commit(&source_oid)?;
+        if !source_collisions.is_empty() {
+            return Ok(CherryPickResult {
+                source_oid,
+                destination: destination.to_string(),
+                status: CherryPickStatus::Failed,
+                detail: format!(
+                    "cherry-pick refused before switching because ignored/untracked paths would be overwritten: {}",
+                    source_collisions.join(", ")
+                ),
+            });
+        }
+
+        if let Err(error) = self.switch_without_overwriting_ignored(destination) {
             return Ok(CherryPickResult {
                 source_oid,
                 destination: destination.to_string(),
@@ -249,13 +302,39 @@ impl GitClient {
                 });
             }
         };
+        if !in_progress {
+            return Ok(CherryPickResult {
+                source_oid,
+                destination: destination.to_string(),
+                status: CherryPickStatus::Failed,
+                detail: if detail.is_empty() {
+                    format!("git cherry-pick failed with exit {:?}", output.exit_code)
+                } else {
+                    detail
+                },
+            });
+        }
+
+        let unresolved = match git.probe(["ls-files", "--unmerged"]) {
+            Ok(result) => result,
+            Err(error) => {
+                return Ok(CherryPickResult {
+                    source_oid,
+                    destination: destination.to_string(),
+                    status: CherryPickStatus::Failed,
+                    detail: format!(
+                        "{detail}; unable to determine whether the cherry-pick has unresolved paths: {error}"
+                    ),
+                });
+            }
+        };
         Ok(CherryPickResult {
             source_oid,
             destination: destination.to_string(),
-            status: if in_progress {
+            status: if !unresolved.stdout.is_empty() {
                 CherryPickStatus::Conflict
             } else {
-                CherryPickStatus::Failed
+                CherryPickStatus::Stopped
             },
             detail: if detail.is_empty() {
                 format!("git cherry-pick failed with exit {:?}", output.exit_code)
@@ -263,6 +342,115 @@ impl GitClient {
                 detail
             },
         })
+    }
+
+    pub fn hard_reset_overwrite_paths(&self, target_reference: &str) -> Result<Vec<String>> {
+        let target_oid = self.resolve_commit(target_reference)?;
+        self.untracked_paths_overlapping_tree(&target_oid)
+    }
+
+    fn untracked_worktree_paths(&self) -> Result<Vec<Vec<u8>>> {
+        let git = self.git();
+        let mut paths = Vec::new();
+        for arguments in [
+            &[
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ][..],
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ][..],
+        ] {
+            let output = git.probe(arguments)?;
+            if !output.success() {
+                return Err(GitError::Backend(format!(
+                    "could not inspect ignored/untracked paths: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            paths.extend(nul_paths(&output.stdout));
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    fn untracked_paths_overlapping_tree(&self, target_oid: &str) -> Result<Vec<String>> {
+        let git = self.git();
+        let output = git.probe([
+            "ls-tree",
+            "--full-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            target_oid,
+        ])?;
+        if !output.success() {
+            return Err(GitError::Backend(format!(
+                "could not inspect target tree: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let target_paths = nul_paths(&output.stdout);
+        let worktree_paths = self.untracked_worktree_paths()?;
+        let mut collisions = worktree_paths
+            .into_iter()
+            .filter(|worktree_path| {
+                target_paths
+                    .iter()
+                    .any(|target_path| paths_overlap_on_filesystem(worktree_path, target_path))
+            })
+            .collect::<Vec<_>>();
+        collisions.sort();
+        collisions.dedup();
+        Ok(collisions
+            .iter()
+            .map(|path| display_git_path(path))
+            .collect())
+    }
+
+    fn untracked_paths_overlapping_commit(&self, commit_oid: &str) -> Result<Vec<String>> {
+        let git = self.git();
+        let output = git.probe([
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+            commit_oid,
+        ])?;
+        if !output.success() {
+            return Err(GitError::Backend(format!(
+                "could not inspect cherry-pick paths: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let commit_paths = nul_paths(&output.stdout);
+        let worktree_paths = self.untracked_worktree_paths()?;
+        let mut collisions = worktree_paths
+            .into_iter()
+            .filter(|worktree_path| {
+                commit_paths
+                    .iter()
+                    .any(|commit_path| paths_overlap_on_filesystem(worktree_path, commit_path))
+            })
+            .collect::<Vec<_>>();
+        collisions.sort();
+        collisions.dedup();
+        Ok(collisions
+            .iter()
+            .map(|path| display_git_path(path))
+            .collect())
     }
 
     pub fn reset_to_commit(
@@ -307,6 +495,16 @@ impl GitClient {
             return Err(GitError::Backend(format!(
                 "HEAD changed: expected {expected_head}, found {previous_head}"
             )));
+        }
+
+        if mode == ResetMode::Hard {
+            let collisions = self.untracked_paths_overlapping_tree(&target_oid)?;
+            if !collisions.is_empty() {
+                return Err(GitError::Backend(format!(
+                    "hard reset blocked because untracked/ignored paths collide with the target tree: {}",
+                    collisions.join(", ")
+                )));
+            }
         }
 
         let output = git.probe(["reset", mode.flag(), target_oid.as_str()])?;
@@ -519,6 +717,18 @@ impl GitClient {
             return Err(GitError::ReferenceNotFound(target.to_string()));
         }
         git.run(["switch", "--", target])?;
+        Ok(())
+    }
+
+    fn switch_without_overwriting_ignored(&self, target: &str) -> Result<()> {
+        let git = self.git();
+        git.ensure_repository()?;
+        let local_ref = format!("refs/heads/{target}");
+        let local_branch = git.probe(["show-ref", "--verify", "--quiet", local_ref.as_str()])?;
+        if !local_branch.success() {
+            return Err(GitError::ReferenceNotFound(target.to_string()));
+        }
+        git.run(["switch", "--no-overwrite-ignore", "--", target])?;
         Ok(())
     }
 

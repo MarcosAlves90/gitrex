@@ -325,6 +325,14 @@ fn execute_cherry_pick(client: GitClient, source: String, destination: String) -
                 result.detail
             ),
         ),
+        CherryPickStatus::Stopped => state_changed_failure(
+            &client,
+            format!(
+                "Cherry-pick is paused on local branch {destination} without unresolved file conflicts for {}. If the change is already applied or empty, run `git cherry-pick --skip`; run `git cherry-pick --abort` to cancel. {}",
+                short_oid(&result.source_oid),
+                result.detail
+            ),
+        ),
         CherryPickStatus::Failed => state_changed_failure(
             &client,
             format!(
