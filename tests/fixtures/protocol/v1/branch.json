@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "operation": "branch",
+  "ok": true,
+  "data": {
+    "branches": [
+      {
+        "name": "main",
+        "current": true,
+        "upstream": null,
+        "commit": "<oid>",
+        "subject": "initial commit",
+        "kind": "local"
+      }
+    ]
+  }
+}

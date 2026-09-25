@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "operation": "log",
+  "ok": true,
+  "data": {
+    "commits": [
+      {
+        "hash": "<oid>",
+        "author": "Gitrex Test",
+        "date": "<date>",
+        "subject": "initial commit"
+      }
+    ]
+  }
+}

@@ -1,23 +1,52 @@
 mod args;
 pub mod output;
+pub(crate) mod protocol;
 
 use crate::domain::branch::{BranchCleanupOutcome, BranchCleanupState};
 use crate::git::GitClient;
 
-pub use args::{Cli, Commands};
+pub use args::{Cli, Commands, OutputFormat};
 
 pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<()> {
     match command {
-        Some(Commands::Status) => output::print_status(&client.status()?),
-        Some(Commands::Branch) => output::print_branches(&client.branches()?),
-        Some(Commands::Log { limit }) => output::print_log(&client.log(limit)?),
+        Some(Commands::Status { format }) => execute_read_only(
+            client.status(),
+            format,
+            "status",
+            protocol::StatusData::from,
+            output::print_status,
+        ),
+        Some(Commands::Branch { format }) => execute_read_only(
+            client.branches(),
+            format,
+            "branch",
+            protocol::BranchData::from,
+            |branches| output::print_branches(branches),
+        ),
+        Some(Commands::Log { limit, format }) => execute_read_only(
+            client.log(limit),
+            format,
+            "log",
+            protocol::LogData::from,
+            |entries| output::print_log(entries),
+        ),
+        Some(Commands::Capabilities { format }) => {
+            let capabilities = protocol::capabilities();
+            match format {
+                OutputFormat::Text => protocol::print_capabilities_text(&capabilities),
+                OutputFormat::Json => protocol::print_success("capabilities", capabilities)?,
+            }
+            Ok(())
+        }
         Some(Commands::Checkout { target }) => {
             client.checkout(&target)?;
             output::print_message(&format!("checked out {target}"));
+            Ok(())
         }
         Some(Commands::Switch { target }) => {
             client.switch(&target)?;
             output::print_message(&format!("switched to {target}"));
+            Ok(())
         }
         Some(Commands::CreateBranch { name, from }) => {
             client.create_branch(&name, from.as_deref())?;
@@ -25,6 +54,7 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
                 Some(source) => output::print_message(&format!("created {name} from {source}")),
                 None => output::print_message(&format!("created {name}")),
             }
+            Ok(())
         }
         Some(Commands::Clone {
             repository,
@@ -32,31 +62,64 @@ pub fn execute(command: Option<Commands>, client: GitClient) -> anyhow::Result<(
         }) => {
             client.clone_repository(&repository, directory.as_deref())?;
             output::print_message("clone complete");
+            Ok(())
         }
         Some(Commands::Fetch { remote }) => {
             client.fetch(remote.as_deref())?;
             output::print_message("fetch complete");
+            Ok(())
         }
         Some(Commands::Pull { remote, branch }) => {
             client.pull(remote.as_deref(), branch.as_deref())?;
             output::print_message("pull complete");
+            Ok(())
         }
         Some(Commands::Push { remote, branch }) => {
             client.push(remote.as_deref(), branch.as_deref())?;
             output::print_message("push complete");
+            Ok(())
         }
         Some(Commands::Cleanup {
             base,
             exclusions,
             remotes,
             yes,
-        }) => execute_cleanup(&client, base, exclusions, remotes, yes)?,
+        }) => {
+            execute_cleanup(&client, base, exclusions, remotes, yes)?;
+            Ok(())
+        }
         Some(Commands::Tui) | None => {
             output::print_help_hint();
+            Ok(())
         }
     }
+}
 
-    Ok(())
+fn execute_read_only<T, U>(
+    result: crate::domain::Result<T>,
+    format: OutputFormat,
+    operation: &'static str,
+    to_protocol: impl FnOnce(T) -> U,
+    print_text: impl FnOnce(&T),
+) -> anyhow::Result<()>
+where
+    U: serde::Serialize,
+{
+    match result {
+        Ok(value) => match format {
+            OutputFormat::Text => {
+                print_text(&value);
+                Ok(())
+            }
+            OutputFormat::Json => protocol::print_success(operation, to_protocol(value)),
+        },
+        Err(error) => {
+            if format == OutputFormat::Json {
+                protocol::print_failure(operation, &error)?;
+            }
+            Err(anyhow::Error::new(error))
+        }
+    }
 }
 
 fn execute_cleanup(

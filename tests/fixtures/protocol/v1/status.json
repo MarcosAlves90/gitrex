@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "operation": "status",
+  "ok": true,
+  "data": {
+    "branch_name": "main",
+    "upstream": null,
+    "ahead": 0,
+    "behind": 0,
+    "files": [
+      {
+        "code": "??",
+        "path": "notes.md"
+      }
+    ]
+  }
+}

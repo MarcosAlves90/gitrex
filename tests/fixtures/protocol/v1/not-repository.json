@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "operation": "status",
+  "ok": false,
+  "error": {
+    "code": "NOT_A_REPOSITORY",
+    "message": "repository not found",
+    "retryable": false
+  }
+}

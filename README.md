@@ -304,6 +304,60 @@ The default base is the current `HEAD`. Use `--base <ref>` to choose another com
 
 Cleanup is based on commit ancestry: a branch tip must be an ancestor of the base commit. A squash merge or rebase can preserve the changes while producing different commit IDs, so those branches may not appear as merged. Git's safe deletion check is repeated for every branch and may still refuse a branch when Git sees unmerged commits.
 
+### Machine-readable protocol
+
+status, branch, and log keep their human-readable output by default. Add --format json to receive the versioned machine protocol. capabilities describes the supported commands and can also be printed as JSON:
+
+    gitrex status --format json
+    gitrex branch --format json
+    gitrex log --limit 5 --format json
+    gitrex capabilities --format json
+
+Every protocol response has schema_version (integer), operation (command name string), and ok (boolean). A successful response contains data; a failed response contains error; warnings is an optional array of strings. The envelope fields that do not apply are omitted.
+
+For example, a failed status request outside a repository is:
+
+    {
+      "schema_version": 1,
+      "operation": "status",
+      "ok": false,
+      "error": {
+        "code": "NOT_A_REPOSITORY",
+        "message": "repository not found",
+        "retryable": false
+      }
+    }
+
+The stable data fields are:
+
+| Operation | Fields and JSON types |
+| --- | --- |
+| status | branch_name: string; upstream: string or null; ahead and behind: integers; files: array of objects with code and path strings |
+| branch | branches: array of objects with name (string), current (boolean), upstream (string or null), commit (string), subject (string), and kind (local or remote) |
+| log | commits: array of objects with hash, author, date (YYYY-MM-DD), and subject, all strings |
+| capabilities | gitrex_version (string); protocol_schema_version (integer); supported_output_formats (string array); operations (array); authorization (object) |
+
+Each capabilities operation has name (string), effects (array of effect names), and output_formats (string array). The authorization object has granted (boolean, always false) and note (string). Empty collections are returned as empty arrays.
+
+Error code is the stable machine identifier. message is a human-readable diagnostic string and may change. retryable is an optional boolean and is omitted when uncertain. Optional details is an object: REFERENCE_NOT_FOUND includes reference (string), COMMAND_FAILED includes command (string) and may include exit_code (integer), and DIVERGED includes ahead and behind (integers). I/O and backend failures share BACKEND_ERROR.
+
+| Code | Meaning |
+| --- | --- |
+| GIT_NOT_INSTALLED | Git could not be started because it is unavailable |
+| NOT_A_REPOSITORY | The current directory is not inside a Git repository |
+| REFERENCE_NOT_FOUND | A requested Git reference does not exist |
+| COMMAND_FAILED | A Git command returned a failure status |
+| DIVERGED | A pull cannot fast-forward because local and remote histories diverged |
+| BACKEND_ERROR | GitRex or operating-system I/O failed |
+| PARSE_ERROR | GitRex could not parse Git output |
+| INVALID_UTF8 | Git output was not valid UTF-8 |
+
+capabilities includes gitrex_version, protocol_schema_version, supported_output_formats, and an ordered operations array. Each operation lists its name, possible effects, and output_formats. Effects are read_only, local_mutation, network_access, and remote_mutation; a command may have more than one. authorization.granted is always false: discovery describes availability and does not authorize execution.
+
+Exit status is 0 on success, 1 for a Git operation failure, and 2 for invalid command syntax or option values. JSON operation failures write the envelope to stdout and retain a readable diagnostic on stderr. Clap usage errors remain human-readable.
+
+The protocol schema version is independent of the GitRex package version. Clients should check schema_version and operation, use error codes instead of parsing messages, and ignore unknown object fields and operation entries. Additive optional fields are compatible; removing or renaming fields, changing a field's type or meaning, or changing required behavior requires a schema-version increment. Versioned response fixtures live in tests/fixtures/protocol/v1/; update them only with the matching protocol-version change.
+
 ## Example Output
 
 ```text

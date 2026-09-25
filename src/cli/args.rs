@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gitrex", version, about = "Terminal-first git manager")]
@@ -9,13 +9,31 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
+
 #[derive(Debug, Clone, Subcommand)]
 pub enum Commands {
-    Status,
-    Branch,
+    Status {
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+    Branch {
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
     Log {
         #[arg(short, long, default_value_t = 20)]
         limit: usize,
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
+    },
+    Capabilities {
+        #[arg(long, value_enum, default_value = "text")]
+        format: OutputFormat,
     },
     Checkout {
         target: String,
