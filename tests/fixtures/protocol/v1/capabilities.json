@@ -12,92 +12,372 @@
     "operations": [
       {
         "name": "branch",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "capabilities",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "change-context",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
+      },
+      {
+        "name": "cherry-pick",
+        "effects": [
+          "local_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation"
+          ],
+          "risk_class": "local_mutation"
+        },
+        "output_formats": []
       },
       {
         "name": "checkout",
-        "effects": ["local_mutation"],
-        "output_formats": ["text"]
+        "effects": [
+          "local_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation"
+          ],
+          "risk_class": "local_mutation"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
+      },
+      {
+        "name": "checkout-detached",
+        "effects": [
+          "local_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation"
+          ],
+          "risk_class": "local_mutation"
+        },
+        "output_formats": []
       },
       {
         "name": "cleanup",
-        "effects": ["local_mutation"],
-        "output_formats": ["text"]
+        "effects": [
+          "local_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation",
+            "destructive"
+          ],
+          "risk_class": "destructive"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "clone",
-        "effects": ["local_mutation", "network_access"],
-        "output_formats": ["text"]
+        "effects": [
+          "local_mutation",
+          "network_access"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation",
+            "network_read"
+          ],
+          "risk_class": "local_mutation"
+        },
+        "output_formats": [
+          "text"
+        ]
       },
       {
         "name": "compare",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "create-branch",
-        "effects": ["local_mutation"],
-        "output_formats": ["text"]
+        "effects": [
+          "local_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation"
+          ],
+          "risk_class": "local_mutation"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
+      },
+      {
+        "name": "delete-local-branch",
+        "effects": [
+          "local_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation",
+            "destructive"
+          ],
+          "risk_class": "destructive"
+        },
+        "output_formats": []
+      },
+      {
+        "name": "delete-remote-branch",
+        "effects": [
+          "network_access",
+          "remote_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "network_read",
+            "remote_mutation",
+            "destructive"
+          ],
+          "risk_class": "destructive"
+        },
+        "output_formats": []
       },
       {
         "name": "diff",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "fetch",
-        "effects": ["local_mutation", "network_access"],
-        "output_formats": ["text"]
+        "effects": [
+          "local_mutation",
+          "network_access"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation",
+            "network_read"
+          ],
+          "risk_class": "local_mutation"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "inspect",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "log",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "pull",
-        "effects": ["local_mutation", "network_access"],
-        "output_formats": ["text"]
+        "effects": [
+          "local_mutation",
+          "network_access"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation",
+            "network_read"
+          ],
+          "risk_class": "local_mutation"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "push",
-        "effects": ["network_access", "remote_mutation"],
-        "output_formats": ["text"]
+        "effects": [
+          "network_access",
+          "remote_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "network_read",
+            "remote_mutation"
+          ],
+          "risk_class": "remote_mutation"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
+      },
+      {
+        "name": "reset",
+        "effects": [
+          "local_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation",
+            "destructive"
+          ],
+          "risk_class": "destructive"
+        },
+        "output_formats": []
       },
       {
         "name": "show",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "status",
-        "effects": ["read_only"],
-        "output_formats": ["text", "json"]
+        "effects": [
+          "read_only"
+        ],
+        "classification": {
+          "effects": [
+            "read_only"
+          ],
+          "risk_class": "read_only"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "switch",
-        "effects": ["local_mutation"],
-        "output_formats": ["text"]
+        "effects": [
+          "local_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "local_mutation"
+          ],
+          "risk_class": "local_mutation"
+        },
+        "output_formats": [
+          "text",
+          "json"
+        ]
       },
       {
         "name": "tui",
-        "effects": ["read_only", "local_mutation", "network_access", "remote_mutation"],
+        "effects": [
+          "read_only",
+          "local_mutation",
+          "network_access",
+          "remote_mutation"
+        ],
+        "classification": {
+          "effects": [
+            "read_only",
+            "local_mutation",
+            "network_read",
+            "remote_mutation",
+            "destructive"
+          ],
+          "risk_class": "destructive"
+        },
         "output_formats": []
       }
     ],

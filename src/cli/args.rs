@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gitrex", version, about = "Terminal-first git manager")]
@@ -32,6 +32,26 @@ impl From<InspectScopeArg> for crate::domain::repository_context::InspectScope {
             InspectScopeArg::Full => Self::Full,
         }
     }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MutationOutputArgs {
+    #[arg(long)]
+    pub expect_head: Option<String>,
+    #[arg(long)]
+    pub expect_branch: Option<String>,
+    #[arg(long)]
+    pub expect_upstream: Option<String>,
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct PlannedMutationOutputArgs {
+    #[command(flatten)]
+    pub mutation: MutationOutputArgs,
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -122,14 +142,20 @@ pub enum Commands {
     },
     Checkout {
         target: String,
+        #[command(flatten)]
+        options: MutationOutputArgs,
     },
     Switch {
         target: String,
+        #[command(flatten)]
+        options: PlannedMutationOutputArgs,
     },
     CreateBranch {
         name: String,
         #[arg(short, long)]
         from: Option<String>,
+        #[command(flatten)]
+        options: PlannedMutationOutputArgs,
     },
     Clone {
         repository: String,
@@ -137,14 +163,20 @@ pub enum Commands {
     },
     Fetch {
         remote: Option<String>,
+        #[command(flatten)]
+        options: PlannedMutationOutputArgs,
     },
     Pull {
         remote: Option<String>,
         branch: Option<String>,
+        #[command(flatten)]
+        options: PlannedMutationOutputArgs,
     },
     Push {
         remote: Option<String>,
         branch: Option<String>,
+        #[command(flatten)]
+        options: PlannedMutationOutputArgs,
     },
     #[command(about = "Preview and safely clean up merged local branches")]
     Cleanup {
@@ -165,6 +197,8 @@ pub enum Commands {
         remotes: Vec<String>,
         #[arg(long, help = "Delete eligible branches after previewing the list")]
         yes: bool,
+        #[command(flatten)]
+        options: PlannedMutationOutputArgs,
     },
     Tui,
 }

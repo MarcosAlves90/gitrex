@@ -5,7 +5,8 @@ use serde_json::{json, Value};
 
 use crate::domain::{
     repository_context as domain_context, BranchInfo, BranchKind as DomainBranchKind,
-    CommitSummary, GitError, RepoStatus, StatusEntry,
+    CommitSummary, GitError, OperationClass, OperationExecution, OperationFailureKind,
+    OperationPlan, RepoStatus, StatusEntry, OPERATION_CLASSIFICATIONS,
 };
 
 pub(crate) const PROTOCOL_SCHEMA_VERSION: u32 = 1;
@@ -53,6 +54,17 @@ impl<T> Envelope<T> {
             warnings: None,
         }
     }
+
+    fn outcome(operation: &'static str, data: T, error: Option<ProtocolError>) -> Self {
+        Self {
+            schema_version: PROTOCOL_SCHEMA_VERSION,
+            operation,
+            ok: error.is_none(),
+            data: Some(data),
+            error,
+            warnings: None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -73,6 +85,8 @@ enum ErrorCode {
     ReferenceNotFound,
     CommandFailed,
     Diverged,
+    PreconditionChanged,
+    VerificationFailed,
     BackendError,
     ParseError,
     InvalidUtf8,
@@ -103,6 +117,45 @@ fn map_git_error(error: &GitError) -> ProtocolError {
                 ("behind".to_string(), json!(behind)),
             ]);
             (ErrorCode::Diverged, Some(false), Some(details))
+        }
+        GitError::PreconditionChanged { details } => {
+            let details = BTreeMap::from([
+                ("expected_head".to_string(), json!(&details.expected_head)),
+                (
+                    "expected_branch".to_string(),
+                    json!(&details.expected_branch),
+                ),
+                (
+                    "expected_upstream".to_string(),
+                    json!(&details.expected_upstream),
+                ),
+                ("observed_head".to_string(), json!(&details.observed_head)),
+                (
+                    "observed_branch".to_string(),
+                    json!(&details.observed_branch),
+                ),
+                (
+                    "observed_upstream".to_string(),
+                    json!(&details.observed_upstream),
+                ),
+                (
+                    "changed_reference".to_string(),
+                    json!(&details.changed_reference),
+                ),
+                (
+                    "expected_reference_commit_id".to_string(),
+                    json!(&details.expected_reference_commit_id),
+                ),
+                (
+                    "observed_reference_commit_id".to_string(),
+                    json!(&details.observed_reference_commit_id),
+                ),
+            ]);
+            (ErrorCode::PreconditionChanged, Some(false), Some(details))
+        }
+        GitError::VerificationFailed(detail) => {
+            let details = BTreeMap::from([("verification".to_string(), json!(detail))]);
+            (ErrorCode::VerificationFailed, Some(false), Some(details))
         }
         GitError::Backend(_) => (ErrorCode::BackendError, None, None),
         GitError::Parse(_) => (ErrorCode::ParseError, Some(false), None),
@@ -638,17 +691,15 @@ pub(crate) struct CapabilitiesData {
 #[derive(Debug, Serialize)]
 struct Operation {
     name: &'static str,
-    effects: &'static [Effect],
+    effects: Vec<&'static str>,
+    classification: OperationClassificationData,
     output_formats: &'static [&'static str],
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Effect {
-    ReadOnly,
-    LocalMutation,
-    NetworkAccess,
-    RemoteMutation,
+struct OperationClassificationData {
+    effects: &'static [OperationClass],
+    risk_class: OperationClass,
 }
 
 #[derive(Debug, Serialize)]
@@ -658,109 +709,32 @@ struct Authorization {
 }
 
 pub(crate) fn capabilities() -> CapabilitiesData {
-    use Effect::{LocalMutation as Local, NetworkAccess as Network, ReadOnly, RemoteMutation};
-
     const TEXT_JSON: &[&str] = &["text", "json"];
-    const TEXT: &[&str] = &["text"];
-    const NO_FORMATS: &[&str] = &[];
-    const READ: &[Effect] = &[ReadOnly];
-    const LOCAL: &[Effect] = &[Local];
-    const LOCAL_NETWORK: &[Effect] = &[Local, Network];
-    const NETWORK_REMOTE: &[Effect] = &[Network, RemoteMutation];
-    const TUI_EFFECTS: &[Effect] = &[ReadOnly, Local, Network, RemoteMutation];
-
-    let operations = vec![
-        Operation {
-            name: "branch",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "capabilities",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "change-context",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "checkout",
-            effects: LOCAL,
-            output_formats: TEXT,
-        },
-        Operation {
-            name: "cleanup",
-            effects: LOCAL,
-            output_formats: TEXT,
-        },
-        Operation {
-            name: "clone",
-            effects: LOCAL_NETWORK,
-            output_formats: TEXT,
-        },
-        Operation {
-            name: "compare",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "create-branch",
-            effects: LOCAL,
-            output_formats: TEXT,
-        },
-        Operation {
-            name: "diff",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "fetch",
-            effects: LOCAL_NETWORK,
-            output_formats: TEXT,
-        },
-        Operation {
-            name: "inspect",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "log",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "pull",
-            effects: LOCAL_NETWORK,
-            output_formats: TEXT,
-        },
-        Operation {
-            name: "push",
-            effects: NETWORK_REMOTE,
-            output_formats: TEXT,
-        },
-        Operation {
-            name: "show",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "status",
-            effects: READ,
-            output_formats: TEXT_JSON,
-        },
-        Operation {
-            name: "switch",
-            effects: LOCAL,
-            output_formats: TEXT,
-        },
-        Operation {
-            name: "tui",
-            effects: TUI_EFFECTS,
-            output_formats: NO_FORMATS,
-        },
-    ];
+    let operations = OPERATION_CLASSIFICATIONS
+        .iter()
+        .map(|classification| Operation {
+            name: classification.name,
+            effects: classification
+                .effects
+                .iter()
+                .filter_map(legacy_effect_name)
+                .collect(),
+            classification: OperationClassificationData {
+                effects: classification.effects,
+                risk_class: classification.risk_class,
+            },
+            output_formats: match classification.name {
+                "clone" => &["text"],
+                "checkout-detached"
+                | "cherry-pick"
+                | "delete-local-branch"
+                | "delete-remote-branch"
+                | "reset"
+                | "tui" => &[],
+                _ => TEXT_JSON,
+            },
+        })
+        .collect();
 
     CapabilitiesData {
         gitrex_version: env!("CARGO_PKG_VERSION"),
@@ -782,6 +756,28 @@ pub(crate) fn print_failure(operation: &'static str, error: &GitError) -> anyhow
     write_json(&Envelope::<Value>::failure(operation, map_git_error(error)))
 }
 
+pub(crate) fn print_operation_plan(
+    operation: &'static str,
+    plan: OperationPlan,
+) -> anyhow::Result<()> {
+    print_success(operation, plan)
+}
+
+pub(crate) fn print_operation_execution(
+    operation: &'static str,
+    execution: OperationExecution,
+) -> anyhow::Result<()> {
+    let error = execution
+        .failure
+        .as_ref()
+        .map(|failure| match failure.kind {
+            OperationFailureKind::Execution | OperationFailureKind::Verification => {
+                map_git_error(&failure.error)
+            }
+        });
+    write_json(&Envelope::outcome(operation, execution.receipt, error))
+}
+
 fn write_json<T: Serialize>(envelope: &Envelope<T>) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(envelope)?);
     Ok(())
@@ -798,27 +794,47 @@ pub(crate) fn print_capabilities_text(capabilities: &CapabilitiesData) {
     );
     println!("operations:");
     for operation in &capabilities.operations {
-        let effects = operation
+        let classes = operation
+            .classification
             .effects
             .iter()
-            .map(|effect| match effect {
-                Effect::ReadOnly => "read_only",
-                Effect::LocalMutation => "local_mutation",
-                Effect::NetworkAccess => "network_access",
-                Effect::RemoteMutation => "remote_mutation",
-            })
+            .map(class_name)
             .collect::<Vec<_>>()
             .join(", ");
         let formats = operation.output_formats.join(", ");
-        println!("  {} [{effects}] formats: {formats}", operation.name);
+        println!(
+            "  {} [{classes}] risk: {} formats: {formats}",
+            operation.name,
+            class_name(&operation.classification.risk_class)
+        );
     }
     println!("{}", capabilities.authorization.note);
+}
+
+fn class_name(class: &OperationClass) -> &'static str {
+    match class {
+        OperationClass::ReadOnly => "read_only",
+        OperationClass::LocalMutation => "local_mutation",
+        OperationClass::NetworkRead => "network_read",
+        OperationClass::RemoteMutation => "remote_mutation",
+        OperationClass::Destructive => "destructive",
+    }
+}
+
+fn legacy_effect_name(class: &OperationClass) -> Option<&'static str> {
+    match class {
+        OperationClass::ReadOnly => Some("read_only"),
+        OperationClass::LocalMutation => Some("local_mutation"),
+        OperationClass::NetworkRead => Some("network_access"),
+        OperationClass::RemoteMutation => Some("remote_mutation"),
+        OperationClass::Destructive => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{map_git_error, Envelope, ErrorCode, PROTOCOL_SCHEMA_VERSION};
-    use crate::domain::GitError;
+    use crate::domain::{GitError, PreconditionChange};
     use serde_json::json;
 
     #[test]
@@ -896,6 +912,41 @@ mod tests {
         assert_eq!(serialized["details"]["command"], "fetch");
         assert!(serialized["details"].get("exit_code").is_none());
         assert!(serialized.get("retryable").is_none());
+    }
+
+    #[test]
+    fn precondition_change_preserves_expected_and_observed_state_details() {
+        let error = map_git_error(&GitError::PreconditionChanged {
+            details: Box::new(PreconditionChange {
+                expected_head: Some("a".repeat(40)),
+                expected_branch: Some("main".to_string()),
+                expected_upstream: Some("origin/main".to_string()),
+                observed_head: Some("b".repeat(40)),
+                observed_branch: Some("feature".to_string()),
+                observed_upstream: Some("origin/feature".to_string()),
+                changed_reference: Some("refs/heads/main".to_string()),
+                expected_reference_commit_id: Some("a".repeat(40)),
+                observed_reference_commit_id: Some("b".repeat(40)),
+            }),
+        });
+        let serialized = serde_json::to_value(error).unwrap();
+
+        assert_eq!(serialized["code"], "PRECONDITION_CHANGED");
+        assert_eq!(serialized["retryable"], false);
+        assert_eq!(serialized["details"]["expected_branch"], "main");
+        assert_eq!(serialized["details"]["observed_branch"], "feature");
+        assert_eq!(
+            serialized["details"]["changed_reference"],
+            "refs/heads/main"
+        );
+        assert_eq!(
+            serialized["details"]["expected_reference_commit_id"],
+            "a".repeat(40)
+        );
+        assert_eq!(
+            serialized["details"]["observed_reference_commit_id"],
+            "b".repeat(40)
+        );
     }
 
     #[test]

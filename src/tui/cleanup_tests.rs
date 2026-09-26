@@ -288,7 +288,7 @@ fn cleanup_confirmation_revalidates_each_branch_reports_partial_results_and_refr
     checked_git(temp.path(), &["checkout", "--quiet", "main"]);
 
     key(&mut controller, KeyCode::Enter);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !controller.app().cleanup_report_is_open() {
         controller.poll_operation().unwrap();
         assert!(

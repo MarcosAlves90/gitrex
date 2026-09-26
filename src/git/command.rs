@@ -126,6 +126,7 @@ fn display_git_path(path: &[u8]) -> String {
 #[derive(Debug, Clone)]
 pub struct GitClient {
     discovery_path: PathBuf,
+    read_only: bool,
 }
 
 impl Default for GitClient {
@@ -137,7 +138,10 @@ impl Default for GitClient {
 impl GitClient {
     pub fn new() -> Self {
         let discovery_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self { discovery_path }
+        Self {
+            discovery_path,
+            read_only: false,
+        }
     }
 
     pub fn from_path(path: impl AsRef<Path>) -> Self {
@@ -150,15 +154,29 @@ impl GitClient {
                 .unwrap_or_else(|_| path.to_path_buf())
         };
 
-        Self { discovery_path }
+        Self {
+            discovery_path,
+            read_only: false,
+        }
     }
 
     pub fn discovery_path(&self) -> &Path {
         &self.discovery_path
     }
 
+    pub(crate) fn read_only(&self) -> Self {
+        Self {
+            discovery_path: self.discovery_path.clone(),
+            read_only: true,
+        }
+    }
+
     pub(crate) fn git(&self) -> super::GitProcess {
-        super::GitProcess::new(&self.discovery_path)
+        if self.read_only {
+            super::GitProcess::new_read_only(&self.discovery_path)
+        } else {
+            super::GitProcess::new(&self.discovery_path)
+        }
     }
 
     pub(crate) fn resolve_commit(&self, reference: &str) -> Result<String> {
@@ -228,20 +246,41 @@ impl GitClient {
         destination: &str,
     ) -> Result<CherryPickResult> {
         let source_oid = self.resolve_commit(source_reference)?;
+        self.cherry_pick_resolved_to_branch(&source_oid, destination, true)
+    }
+
+    pub(crate) fn cherry_pick_planned_to_branch(
+        &self,
+        source_oid: &str,
+        destination: &str,
+    ) -> Result<CherryPickResult> {
+        self.cherry_pick_resolved_to_branch(source_oid, destination, false)
+    }
+
+    fn cherry_pick_resolved_to_branch(
+        &self,
+        source_oid: &str,
+        destination: &str,
+        validate_initial_state: bool,
+    ) -> Result<CherryPickResult> {
+        let source_oid = source_oid.to_string();
         let git = self.git();
-        git.ensure_repository()?;
+        if validate_initial_state {
+            git.ensure_repository()?;
 
-        let destination_ref = format!("refs/heads/{destination}");
-        let branch = git.probe(["show-ref", "--verify", "--quiet", destination_ref.as_str()])?;
-        if !branch.success() {
-            return Err(GitError::ReferenceNotFound(destination.to_string()));
-        }
+            let destination_ref = format!("refs/heads/{destination}");
+            let branch =
+                git.probe(["show-ref", "--verify", "--quiet", destination_ref.as_str()])?;
+            if !branch.success() {
+                return Err(GitError::ReferenceNotFound(destination.to_string()));
+            }
 
-        let dirty = git.run_text(["status", "--porcelain=v1", "--untracked-files=all"])?;
-        if !dirty.trim().is_empty() {
-            return Err(GitError::Backend(
-                "cherry-pick requires a clean index and worktree".to_string(),
-            ));
+            let dirty = git.run_text(["status", "--porcelain=v1", "--untracked-files=all"])?;
+            if !dirty.trim().is_empty() {
+                return Err(GitError::Backend(
+                    "cherry-pick requires a clean index and worktree".to_string(),
+                ));
+            }
         }
 
         let source_collisions = self.untracked_paths_overlapping_commit(&source_oid)?;
@@ -257,7 +296,13 @@ impl GitClient {
             });
         }
 
-        if let Err(error) = self.switch_without_overwriting_ignored(destination) {
+        let switch_result = if validate_initial_state {
+            self.switch_without_overwriting_ignored(destination)
+        } else {
+            git.run(["switch", "--no-overwrite-ignore", "--", destination])
+                .map(|_| ())
+        };
+        if let Err(error) = switch_result {
             return Ok(CherryPickResult {
                 source_oid,
                 destination: destination.to_string(),
@@ -762,6 +807,21 @@ impl GitClient {
         Ok(())
     }
 
+    pub(crate) fn delete_remote_branch_to_remote(&self, remote: &str, branch: &str) -> Result<()> {
+        let git = self.git();
+        git.ensure_repository()?;
+        git.run([
+            "push",
+            "--no-follow-tags",
+            "--recurse-submodules=no",
+            "--delete",
+            "--",
+            remote,
+            branch,
+        ])?;
+        Ok(())
+    }
+
     pub fn clone_repository(&self, repository: &str, directory: Option<&Path>) -> Result<()> {
         let git = self.git();
         let path = match directory {
@@ -822,6 +882,21 @@ impl GitClient {
                 git.run(["push", "--", remote, refspec.as_str()])?;
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn push_branch_to_remote(&self, remote: &str, branch: &str) -> Result<()> {
+        let git = self.git();
+        git.ensure_repository()?;
+        let refspec = format!("HEAD:refs/heads/{branch}");
+        git.run([
+            "push",
+            "--no-follow-tags",
+            "--recurse-submodules=no",
+            "--",
+            remote,
+            refspec.as_str(),
+        ])?;
         Ok(())
     }
 }
