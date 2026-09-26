@@ -2665,17 +2665,17 @@ mod tests {
     fn push_verifies_the_configured_path_with_spaces() {
         let temp = TempDir::new().unwrap();
         let (repo, client, base, _) = test_repository(temp.path());
-        let spaced_path = temp.path().join(" spaced.git ");
-        let spaced = clone_bare_repo(&temp.path().join("worktree"), &spaced_path);
-        let endpoint = spaced_path.to_str().unwrap();
+        write_file(&temp.path().join("worktree"), "update.txt", "next\n");
+        let next = commit_all(&repo, "advance main");
+        let spaced_path = temp.path().join("worktree").join(" spaced.git");
+        let spaced = clone_bare_repo(&temp.path().join("origin.git"), &spaced_path);
+        let endpoint = " spaced.git";
         client
             .git()
             .run(["remote", "set-url", "--push", "origin", endpoint])
             .unwrap();
         assert_eq!(resolve_push_endpoint(&client, "origin").unwrap(), endpoint);
 
-        write_file(&temp.path().join("worktree"), "update.txt", "next\n");
-        let next = commit_all(&repo, "advance main");
         let execution = execute_mutation(
             &client,
             &MutationRequest::Push {
