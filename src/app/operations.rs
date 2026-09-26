@@ -15,6 +15,8 @@ pub fn plan_mutation(
     request: &MutationRequest,
     preconditions: &OperationPreconditions,
 ) -> Result<OperationPlan> {
+    let planning_client = client.read_only();
+    let client = &planning_client;
     let observed_state = read_state(
         client,
         operation_tracks_worktree(request),
@@ -165,6 +167,7 @@ pub fn plan_mutation(
             });
         }
         MutationRequest::DeleteRemoteBranch { remote, branch } => {
+            resolve_push_endpoint(client, remote)?;
             expected_remote_effects.push(ExpectedEffect {
                 action: "delete_remote_branch".to_string(),
                 target: format!("{remote}/refs/heads/{branch}"),
@@ -238,9 +241,13 @@ pub fn plan_mutation(
         MutationRequest::Push { remote, branch } => {
             if let Some(head) = observed_state.head.clone() {
                 add_ref(&mut refs, "HEAD", Some(head.clone()));
-                if let Some((remote, branch)) =
-                    push_target(remote.as_deref(), branch.as_deref(), &observed_state)
-                {
+                if let Some((remote, branch)) = push_target(
+                    client,
+                    remote.as_deref(),
+                    branch.as_deref(),
+                    &observed_state,
+                )? {
+                    resolve_push_endpoint(client, &remote)?;
                     expected_remote_effects.push(ExpectedEffect {
                         action: "update_remote_branch".to_string(),
                         target: format!("{remote}/refs/heads/{branch}"),
@@ -280,7 +287,7 @@ pub fn execute_mutation(
         }
         _ => None,
     };
-    let remote_target = execution_remote_target(request, &plan.observed_state);
+    let remote_target = execution_remote_target(client, request, &plan.observed_state)?;
     let remote_before = remote_target
         .as_ref()
         .and_then(|(remote, reference)| read_remote_ref(client, remote, reference).ok().flatten());
@@ -300,7 +307,7 @@ pub fn execute_mutation(
     let local_refs_before = read_relevant_refs(client, &plan)?;
     validate_plan_refs(&plan, &local_refs_before, &before)?;
 
-    let execution_error = perform_mutation(client, request, &plan).err();
+    let execution_error = perform_mutation(client, request, &plan, remote_target.as_ref()).err();
     let after_state_result = read_state(client, tracks_worktree, tracks_cherry_pick);
     let (after, after_state_error) = match after_state_result {
         Ok(state) => (state, None),
@@ -382,7 +389,6 @@ pub fn execute_mutation(
             MutationPostState {
                 after: &after,
                 refs_after: &refs_after,
-                tracking_after: &tracking_after,
                 remote_target: remote_target.as_ref(),
                 remote_after: remote_after.as_deref(),
             },
@@ -458,6 +464,7 @@ fn perform_mutation(
     client: &GitClient,
     request: &MutationRequest,
     plan: &OperationPlan,
+    remote_target: Option<&(String, String)>,
 ) -> Result<()> {
     match request {
         MutationRequest::Checkout { target } => client.checkout(target),
@@ -533,8 +540,14 @@ fn perform_mutation(
             client.create_branch(name, Some(source))
         }
         MutationRequest::DeleteLocalBranch { branch } => client.delete_local_branch(branch),
-        MutationRequest::DeleteRemoteBranch { remote, branch } => {
-            client.delete_remote_branch(remote, branch)
+        MutationRequest::DeleteRemoteBranch { .. } => {
+            let (remote, reference) = remote_target.ok_or_else(|| {
+                GitError::Backend("planned remote branch destination is missing".into())
+            })?;
+            let branch = reference.strip_prefix("refs/heads/").ok_or_else(|| {
+                GitError::Backend("planned remote destination is not a branch".into())
+            })?;
+            client.delete_remote_branch_to_remote(remote, branch)
         }
         MutationRequest::Cleanup {
             base,
@@ -592,8 +605,13 @@ fn perform_mutation(
         MutationRequest::Pull { remote, branch } => {
             client.pull(remote.as_deref(), branch.as_deref())
         }
-        MutationRequest::Push { remote, branch } => {
-            client.push(remote.as_deref(), branch.as_deref())
+        MutationRequest::Push { .. } => {
+            let (remote, reference) = remote_target
+                .ok_or_else(|| GitError::Backend("planned push destination is missing".into()))?;
+            let branch = reference.strip_prefix("refs/heads/").ok_or_else(|| {
+                GitError::Backend("planned push destination is not a branch".into())
+            })?;
+            client.push_branch_to_remote(remote, branch)
         }
     }
 }
@@ -601,7 +619,6 @@ fn perform_mutation(
 struct MutationPostState<'a> {
     after: &'a OperationState,
     refs_after: &'a BTreeMap<String, Option<String>>,
-    tracking_after: &'a BTreeMap<String, String>,
     remote_target: Option<&'a (String, String)>,
     remote_after: Option<&'a str>,
 }
@@ -615,7 +632,6 @@ fn verify_mutation(
     let MutationPostState {
         after,
         refs_after,
-        tracking_after,
         remote_target,
         remote_after,
     } = post;
@@ -783,7 +799,7 @@ fn verify_mutation(
             checks.push("planned_cleanup_branches_absent".to_string());
         }
         MutationRequest::Fetch { remote } => {
-            verify_fetch_refs(client, remote.as_deref(), tracking_after)?;
+            verify_fetch_refs(client, remote.as_deref())?;
             checks.push("remote_tracking_refs_match_advertised_remote_refs".to_string());
         }
         MutationRequest::Pull { .. } => {
@@ -1316,11 +1332,85 @@ fn advertised_remote_heads(client: &GitClient, remote: &str) -> Result<BTreeMap<
     Ok(refs)
 }
 
-fn verify_fetch_refs(
-    client: &GitClient,
-    remote: Option<&str>,
-    tracking_after: &BTreeMap<String, String>,
-) -> Result<()> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FetchRefspec {
+    source: String,
+    destination: Option<String>,
+    negative: bool,
+}
+
+fn parse_fetch_refspec(value: &str) -> Option<FetchRefspec> {
+    let value = value.strip_prefix('+').unwrap_or(value);
+    let (negative, value) = value
+        .strip_prefix('^')
+        .map_or((false, value), |value| (true, value));
+    let (source, destination) = value
+        .split_once(':')
+        .map_or((value, None), |(source, destination)| {
+            (source, (!destination.is_empty()).then_some(destination))
+        });
+    if source.is_empty() || source.matches('*').count() > 1 {
+        return None;
+    }
+    if destination.is_some_and(|destination| destination.matches('*').count() > 1) {
+        return None;
+    }
+    if !negative
+        && destination.is_none_or(|destination| {
+            !destination.starts_with("refs/")
+                || source.matches('*').count() != destination.matches('*').count()
+        })
+    {
+        return None;
+    }
+    let source = if source.starts_with("refs/") {
+        source.to_string()
+    } else {
+        format!("refs/heads/{source}")
+    };
+    Some(FetchRefspec {
+        source,
+        destination: destination.map(str::to_string),
+        negative,
+    })
+}
+
+fn fetch_refspec_capture(source: &str, remote_ref: &str) -> Option<String> {
+    let Some((prefix, suffix)) = source.split_once('*') else {
+        return (source == remote_ref).then(String::new);
+    };
+    let remainder = remote_ref.strip_prefix(prefix)?;
+    if !remainder.ends_with(suffix) || remainder.len() < suffix.len() {
+        return None;
+    }
+    Some(remainder[..remainder.len() - suffix.len()].to_string())
+}
+
+fn fetch_refspec_destination(spec: &FetchRefspec, capture: &str) -> Option<String> {
+    let destination = spec.destination.as_ref()?;
+    if destination.contains('*') {
+        Some(destination.replacen('*', capture, 1))
+    } else if spec.source.contains('*') {
+        None
+    } else {
+        Some(destination.clone())
+    }
+}
+
+fn fetch_refspec_source_for_destination(spec: &FetchRefspec, destination: &str) -> Option<String> {
+    let configured_destination = spec.destination.as_deref()?;
+    let capture = fetch_refspec_capture(configured_destination, destination)?;
+    if spec.source.contains('*') {
+        Some(spec.source.replacen('*', &capture, 1))
+    } else if configured_destination.contains('*') {
+        None
+    } else {
+        Some(spec.source.clone())
+    }
+}
+
+fn verify_fetch_refs(client: &GitClient, remote: Option<&str>) -> Result<()> {
+    let fetch_all = remote.is_none();
     let remotes = if let Some(remote) = remote {
         vec![remote.to_string()]
     } else {
@@ -1335,19 +1425,111 @@ fn verify_fetch_refs(
     };
 
     for remote in remotes {
+        if fetch_all && remote_skips_fetch_all(client, &remote)? {
+            continue;
+        }
+        let refspec_key = remote_config_key(&remote, "fetch");
+        let refspecs = read_config_values(client, &refspec_key)?
+            .iter()
+            .map(|value| {
+                parse_fetch_refspec(value).ok_or_else(|| {
+                    GitError::VerificationFailed(format!(
+                        "unsupported fetch refspec for remote '{remote}'"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if refspecs.is_empty()
+            || refspecs
+                .iter()
+                .any(|refspec| !refspec.negative && !refspec.source.starts_with("refs/heads/"))
+        {
+            return Err(GitError::VerificationFailed(format!(
+                "fetch refspecs for remote '{remote}' cannot be verified as branch refs"
+            )));
+        }
+        let positive = refspecs
+            .iter()
+            .filter(|refspec| !refspec.negative && refspec.source.starts_with("refs/heads/"))
+            .collect::<Vec<_>>();
+        if positive.is_empty() {
+            return Err(GitError::VerificationFailed(format!(
+                "no verifiable branch fetch refspec is configured for remote '{remote}'"
+            )));
+        }
+        let negative = refspecs
+            .iter()
+            .filter(|refspec| refspec.negative)
+            .collect::<Vec<_>>();
         let advertised = advertised_remote_heads(client, &remote).map_err(|_| {
             GitError::VerificationFailed(format!(
                 "could not verify fetched refs for remote '{remote}'"
             ))
         })?;
-        for (remote_ref, commit_id) in advertised {
-            let Some(branch) = remote_ref.strip_prefix("refs/heads/") else {
+        for (remote_ref, commit_id) in &advertised {
+            if negative
+                .iter()
+                .any(|refspec| fetch_refspec_capture(&refspec.source, remote_ref).is_some())
+            {
+                continue;
+            }
+            for refspec in &positive {
+                let Some(capture) = fetch_refspec_capture(&refspec.source, remote_ref) else {
+                    continue;
+                };
+                let Some(destination) = fetch_refspec_destination(refspec, &capture) else {
+                    continue;
+                };
+                if read_ref_oid(client, &destination)?.as_deref() != Some(commit_id.as_str()) {
+                    return Err(GitError::VerificationFailed(format!(
+                        "fetched ref '{destination}' does not match advertised remote ref '{remote_ref}'"
+                    )));
+                }
+            }
+        }
+
+        let destination_patterns = positive
+            .iter()
+            .filter_map(|refspec| refspec.destination.as_deref())
+            .map(|destination| {
+                destination
+                    .split_once('*')
+                    .map_or(destination, |(prefix, _)| prefix)
+            })
+            .collect::<Vec<_>>();
+        if destination_patterns.is_empty() {
+            continue;
+        }
+        let mut args = vec![
+            "for-each-ref".to_string(),
+            "--format=%(refname)%09%(symref)".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(destination_patterns.into_iter().map(str::to_string));
+        let local_refs = client.git().run_text(args.iter().map(String::as_str))?;
+        for line in local_refs.lines() {
+            let Some((destination, symref)) = line.split_once('\t') else {
                 continue;
             };
-            let tracking_ref = format!("refs/remotes/{remote}/{branch}");
-            if tracking_after.get(&tracking_ref) != Some(&commit_id) {
+            if !symref.is_empty() {
+                continue;
+            }
+            let selected_sources = positive
+                .iter()
+                .filter_map(|refspec| fetch_refspec_source_for_destination(refspec, destination))
+                .filter(|source| {
+                    !negative
+                        .iter()
+                        .any(|refspec| fetch_refspec_capture(&refspec.source, source).is_some())
+                })
+                .collect::<Vec<_>>();
+            if !selected_sources.is_empty()
+                && !selected_sources
+                    .iter()
+                    .any(|source| advertised.contains_key(source))
+            {
                 return Err(GitError::VerificationFailed(format!(
-                    "tracking ref '{tracking_ref}' does not match the advertised remote commit"
+                    "stale fetched ref '{destination}' was not pruned"
                 )));
             }
         }
@@ -1356,9 +1538,11 @@ fn verify_fetch_refs(
 }
 
 fn read_remote_ref(client: &GitClient, remote: &str, reference: &str) -> Result<Option<String>> {
-    let output = client
-        .git()
-        .probe(["ls-remote", "--heads", "--", remote, reference])?;
+    let endpoint = resolve_push_endpoint(client, remote)?;
+    let output =
+        client
+            .git()
+            .probe(["ls-remote", "--heads", "--", endpoint.as_str(), reference])?;
     if !output.success() {
         return Err(GitError::Backend(format!(
             "could not read remote ref '{remote}/{reference}'"
@@ -1367,8 +1551,206 @@ fn read_remote_ref(client: &GitClient, remote: &str, reference: &str) -> Result<
     let text = String::from_utf8(output.stdout).map_err(|_| GitError::Utf8)?;
     Ok(text.lines().find_map(|line| {
         line.split_once('\t')
-            .map(|(commit_id, _)| commit_id.to_string())
+            .and_then(|(commit_id, name)| (name == reference).then(|| commit_id.to_string()))
     }))
+}
+
+fn read_config_values(client: &GitClient, key: &str) -> Result<Vec<String>> {
+    let output = client.git().probe(["config", "--null", "--get-all", key])?;
+    if output.exit_code == Some(1) {
+        return Ok(Vec::new());
+    }
+    if !output.success() {
+        return Err(GitError::Backend(format!(
+            "could not read Git configuration key '{key}'"
+        )));
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| GitError::Utf8)?;
+    Ok(text
+        .split('\0')
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn read_config_value(client: &GitClient, key: &str) -> Result<Option<String>> {
+    Ok(read_config_values(client, key)?.pop())
+}
+
+fn read_config_bool(client: &GitClient, key: &str) -> Result<Option<bool>> {
+    let output = client.git().probe(["config", "--bool", "--get", key])?;
+    if output.exit_code == Some(1) {
+        return Ok(None);
+    }
+    if !output.success() {
+        return Err(GitError::Backend(format!(
+            "could not read Git configuration key '{key}'"
+        )));
+    }
+    let value = String::from_utf8(output.stdout).map_err(|_| GitError::Utf8)?;
+    match value.trim() {
+        "true" => Ok(Some(true)),
+        "false" => Ok(Some(false)),
+        _ => Err(GitError::Backend(format!(
+            "invalid boolean Git configuration key '{key}'"
+        ))),
+    }
+}
+
+fn remote_config_key(remote: &str, name: &str) -> String {
+    format!("remote.{remote}.{name}")
+}
+
+fn branch_config_key(branch: &str, name: &str) -> String {
+    format!("branch.{branch}.{name}")
+}
+
+fn remote_skips_fetch_all(client: &GitClient, remote: &str) -> Result<bool> {
+    let output = client.git().probe([
+        "config",
+        "--null",
+        "--bool",
+        "--get-regexp",
+        r"^remote\..*\.skip(fetchall|defaultupdate)$",
+    ])?;
+    if output.exit_code == Some(1) {
+        return Ok(false);
+    }
+    if !output.success() {
+        return Err(GitError::Backend(
+            "could not read Git fetch-all skip settings".into(),
+        ));
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| GitError::Utf8)?;
+    let current_key = remote_config_key(remote, "skipfetchall");
+    let legacy_key = remote_config_key(remote, "skipdefaultupdate");
+    let mut skip = false;
+    for entry in text.split_terminator('\0') {
+        let Some((key, value)) = entry.split_once('\n') else {
+            return Err(GitError::Backend(
+                "invalid Git fetch-all skip setting".into(),
+            ));
+        };
+        if key == current_key || key == legacy_key {
+            skip = match value {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(GitError::Backend(
+                        "invalid boolean Git fetch-all skip setting".into(),
+                    ));
+                }
+            };
+        }
+    }
+    Ok(skip)
+}
+
+fn direct_remote_has_push_rewrite(client: &GitClient, remote: &str) -> Result<bool> {
+    let output = client.git().probe([
+        "config",
+        "--null",
+        "--get-regexp",
+        r"^url\..*\.pushinsteadof$",
+    ])?;
+    if output.exit_code == Some(1) {
+        return Ok(false);
+    }
+    if !output.success() {
+        return Err(GitError::Backend(
+            "could not inspect Git push URL rewrites".into(),
+        ));
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| GitError::Utf8)?;
+    let expanded_for_fetch = client
+        .git()
+        .probe(["ls-remote", "--get-url", "--", remote])?;
+    if !expanded_for_fetch.success() {
+        return Err(GitError::Backend(
+            "could not inspect the remote URL rewrite".into(),
+        ));
+    }
+    let expanded_for_fetch =
+        String::from_utf8(expanded_for_fetch.stdout).map_err(|_| GitError::Utf8)?;
+    let expanded_for_fetch = expanded_for_fetch.trim_end_matches(['\r', '\n']);
+    Ok(text
+        .split('\0')
+        .filter_map(|record| record.split_once('\n').map(|(_, prefix)| prefix))
+        .any(|prefix| remote.starts_with(prefix) || expanded_for_fetch.starts_with(prefix)))
+}
+
+fn remote_url_contains_credentials(remote: &str) -> bool {
+    remote.split_once("://").is_some_and(|(_, rest)| {
+        rest.split('/')
+            .next()
+            .is_some_and(|authority| authority.contains('@'))
+    })
+}
+
+fn resolve_push_endpoint(client: &GitClient, remote: &str) -> Result<String> {
+    if remote == "." {
+        return Ok(remote.to_string());
+    }
+    if remote_url_contains_credentials(remote) {
+        return Err(GitError::Backend(
+            "remote URL with embedded credentials must be configured as a named remote".into(),
+        ));
+    }
+    let configured_remotes = client.git().run_text(["remote"])?;
+    if configured_remotes.lines().any(|name| name == remote) {
+        let output = client
+            .git()
+            .probe(["remote", "get-url", "--push", "--all", "--", remote])?;
+        if !output.success() {
+            return Err(GitError::Backend(format!(
+                "could not resolve the push destination for remote '{remote}'"
+            )));
+        }
+        let text = String::from_utf8(output.stdout).map_err(|_| GitError::Utf8)?;
+        let endpoints = text
+            .lines()
+            .filter(|endpoint| !endpoint.is_empty())
+            .collect::<Vec<_>>();
+        return match endpoints.as_slice() {
+            [endpoint] => {
+                let expanded_for_read =
+                    client
+                        .git()
+                        .probe(["ls-remote", "--get-url", "--", *endpoint])?;
+                if !expanded_for_read.success() {
+                    return Err(GitError::Backend(
+                        "could not inspect the push destination URL rewrite".into(),
+                    ));
+                }
+                let expanded_for_read =
+                    String::from_utf8(expanded_for_read.stdout).map_err(|_| GitError::Utf8)?;
+                if expanded_for_read.trim_end_matches(['\r', '\n']) != *endpoint {
+                    return Err(GitError::Backend(
+                        "push destination cannot be verified with chained URL rewrites".into(),
+                    ));
+                }
+                Ok((*endpoint).to_string())
+            }
+            [] => Err(GitError::Backend(format!(
+                "remote '{remote}' has no push destination"
+            ))),
+            _ => Err(GitError::Backend(format!(
+                "remote '{remote}' has multiple push destinations; select one remote URL explicitly"
+            ))),
+        };
+    }
+    if !read_config_values(client, &format!("remotes.{remote}"))?.is_empty() {
+        return Err(GitError::Backend(format!(
+            "remote group '{remote}' has multiple push destinations and cannot be planned as one effect"
+        )));
+    }
+    if direct_remote_has_push_rewrite(client, remote)? {
+        return Err(GitError::Backend(
+            "direct remote URL with push rewrites cannot be verified; configure a named remote"
+                .into(),
+        ));
+    }
+    Ok(remote.to_string())
 }
 
 fn pull_target(
@@ -1390,36 +1772,124 @@ fn pull_target(
 }
 
 fn push_target(
+    client: &GitClient,
     remote: Option<&str>,
     branch: Option<&str>,
     state: &OperationState,
-) -> Option<(String, String)> {
+) -> Result<Option<(String, String)>> {
     if let Some(branch) = branch {
-        return Some((remote.unwrap_or("origin").to_string(), branch.to_string()));
+        return Ok(Some((
+            remote.unwrap_or("origin").to_string(),
+            branch.to_string(),
+        )));
     }
-    if let Some(upstream) = &state.upstream {
-        let (upstream_remote, upstream_branch) = upstream.split_once('/')?;
-        return Some((
-            remote.unwrap_or(upstream_remote).to_string(),
-            upstream_branch.to_string(),
+
+    let current_branch = state.branch.as_deref().ok_or_else(|| {
+        GitError::Backend("push requires a checked-out branch or an explicit target branch".into())
+    })?;
+    let branch_remote =
+        read_config_value(client, &branch_config_key(current_branch, "pushRemote"))?;
+    let default_remote = read_config_value(client, "remote.pushDefault")?;
+    let upstream_remote = read_config_value(client, &branch_config_key(current_branch, "remote"))?;
+    let pull_remote = upstream_remote
+        .clone()
+        .unwrap_or_else(|| "origin".to_string());
+    let selected_remote = remote
+        .map(str::to_string)
+        .or(branch_remote)
+        .or(default_remote)
+        .or(upstream_remote)
+        .unwrap_or_else(|| "origin".to_string());
+
+    if remote_url_contains_credentials(&selected_remote) {
+        return Err(GitError::Backend(
+            "remote URL with embedded credentials must be configured as a named remote".into(),
         ));
     }
-    remote.map(str::to_owned).zip(state.branch.clone())
+
+    let remote_push = read_config_values(client, &remote_config_key(&selected_remote, "push"))?;
+    if !remote_push.is_empty() {
+        return Err(GitError::Backend(format!(
+            "remote '{selected_remote}' has custom push refspecs; pass an explicit branch to plan one target"
+        )));
+    }
+    let upstream_branch = read_config_value(client, &branch_config_key(current_branch, "merge"))?
+        .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_string));
+    let mode = read_config_value(client, "push.default")?.unwrap_or_else(|| "simple".to_string());
+    if upstream_branch.is_none()
+        && matches!(
+            mode.as_str(),
+            "simple" | "current" | "upstream" | "tracking"
+        )
+        && read_config_bool(client, "push.autoSetupRemote")? == Some(true)
+    {
+        return Err(GitError::Backend(
+            "push.autoSetupRemote would change upstream configuration; pass --branch explicitly"
+                .into(),
+        ));
+    }
+    let target_branch = match mode.as_str() {
+        "current" => current_branch,
+        "upstream" | "tracking" => {
+            if selected_remote != pull_remote {
+                return Err(GitError::Backend(
+                    "push.default=upstream requires the upstream remote; pass --branch explicitly"
+                        .into(),
+                ));
+            }
+            upstream_branch.as_deref().ok_or_else(|| {
+                GitError::Backend(
+                    "push.default requires an upstream branch; pass --branch explicitly".into(),
+                )
+            })?
+        }
+        "simple" => {
+            if selected_remote == pull_remote && upstream_branch.as_deref() != Some(current_branch)
+            {
+                return Err(GitError::Backend(
+                    "push.default=simple requires an upstream branch with the same name; pass --branch explicitly".into(),
+                ));
+            }
+            current_branch
+        }
+        "matching" => {
+            return Err(GitError::Backend(
+                "push.default=matching can update multiple branches; pass --branch to select one target".into(),
+            ));
+        }
+        "nothing" => {
+            return Err(GitError::Backend(
+                "push.default=nothing requires an explicit branch target".into(),
+            ));
+        }
+        _ => {
+            return Err(GitError::Backend(format!(
+                "unsupported push.default value '{mode}'"
+            )));
+        }
+    };
+    Ok(Some((selected_remote, target_branch.to_string())))
 }
 
 fn execution_remote_target(
+    client: &GitClient,
     request: &MutationRequest,
     state: &OperationState,
-) -> Option<(String, String)> {
+) -> Result<Option<(String, String)>> {
     match request {
         MutationRequest::Push { remote, branch } => {
-            push_target(remote.as_deref(), branch.as_deref(), state)
-                .map(|(remote, branch)| (remote, format!("refs/heads/{branch}")))
+            push_target(client, remote.as_deref(), branch.as_deref(), state)?
+                .map(|(remote, branch)| {
+                    resolve_push_endpoint(client, &remote)
+                        .map(|_| (remote, format!("refs/heads/{branch}")))
+                })
+                .transpose()
         }
         MutationRequest::DeleteRemoteBranch { remote, branch } => {
-            Some((remote.clone(), format!("refs/heads/{branch}")))
+            resolve_push_endpoint(client, remote)?;
+            Ok(Some((remote.clone(), format!("refs/heads/{branch}"))))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -1534,7 +2004,6 @@ mod tests {
         ];
         let missing_state = OperationState::default();
         let empty_refs = BTreeMap::new();
-        let empty_tracking = BTreeMap::new();
 
         for request in requests {
             let plan = plan_mutation(&client, &request, &OperationPreconditions::default())
@@ -1546,7 +2015,8 @@ mod tests {
             if matches!(request, MutationRequest::Cleanup { .. }) {
                 refs_after.insert("refs/heads/merged".into(), Some(base.clone()));
             }
-            let remote_target = execution_remote_target(&request, &plan.observed_state);
+            let remote_target =
+                execution_remote_target(&client, &request, &plan.observed_state).unwrap();
             let remote_after = match &request {
                 MutationRequest::DeleteRemoteBranch { .. } => Some(base.clone()),
                 MutationRequest::Push { .. } => Some("f".repeat(40)),
@@ -1559,7 +2029,6 @@ mod tests {
                 MutationPostState {
                     after: &missing_state,
                     refs_after: &refs_after,
-                    tracking_after: &empty_tracking,
                     remote_target: remote_target.as_ref(),
                     remote_after: remote_after.as_deref(),
                 },
@@ -1587,7 +2056,6 @@ mod tests {
             MutationPostState {
                 after: &attached_after,
                 refs_after: &empty_refs,
-                tracking_after: &empty_tracking,
                 remote_target: None,
                 remote_after: None,
             },
@@ -1609,7 +2077,6 @@ mod tests {
             MutationPostState {
                 after: &attached_after,
                 refs_after: &empty_refs,
-                tracking_after: &empty_tracking,
                 remote_target: None,
                 remote_after: None,
             },
@@ -1635,7 +2102,6 @@ mod tests {
             MutationPostState {
                 after: &in_progress,
                 refs_after: &cherry_pick_refs,
-                tracking_after: &empty_tracking,
                 remote_target: None,
                 remote_after: None,
             },
@@ -1657,7 +2123,6 @@ mod tests {
             MutationPostState {
                 after: &reset_plan.observed_state,
                 refs_after: &reset_refs,
-                tracking_after: &empty_tracking,
                 remote_target: None,
                 remote_after: None,
             },
@@ -1851,37 +2316,124 @@ mod tests {
 
     #[test]
     fn pull_and_push_target_selection_uses_explicit_and_upstream_context() {
+        let temp = TempDir::new().unwrap();
+        let (repo, client, base, _) = test_repository(temp.path());
+        repo.reference("refs/remotes/origin/main", base, true, "test tracking ref")
+            .unwrap();
+        set_upstream(&repo, "main", "origin/main");
         let upstream_state = OperationState {
-            branch: Some("local".into()),
-            upstream: Some("upstream/release".into()),
+            branch: Some("main".into()),
+            upstream: Some("origin/main".into()),
             ..OperationState::default()
         };
         assert_eq!(
             pull_target(None, None, &upstream_state),
-            Some(("upstream".into(), "release".into()))
+            Some(("origin".into(), "main".into()))
         );
         assert_eq!(
             pull_target(Some("origin"), None, &upstream_state),
-            Some(("origin".into(), "release".into()))
+            Some(("origin".into(), "main".into()))
         );
         assert_eq!(
             pull_target(Some("origin"), Some("main"), &upstream_state),
             Some(("origin".into(), "main".into()))
         );
         assert_eq!(
-            push_target(None, None, &upstream_state),
-            Some(("upstream".into(), "release".into()))
-        );
-        assert_eq!(
-            push_target(Some("origin"), Some("main"), &upstream_state),
+            push_target(&client, None, None, &upstream_state).unwrap(),
             Some(("origin".into(), "main".into()))
         );
+        assert_eq!(
+            push_target(&client, Some("origin"), Some("main"), &upstream_state).unwrap(),
+            Some(("origin".into(), "main".into()))
+        );
+
+        client
+            .git()
+            .run(["config", "remote.pushDefault", "fallback"])
+            .unwrap();
+        client
+            .git()
+            .run(["config", "branch.main.pushRemote", "branch-remote"])
+            .unwrap();
+        assert_eq!(
+            push_target(&client, None, None, &upstream_state).unwrap(),
+            Some(("branch-remote".into(), "main".into()))
+        );
+        client
+            .git()
+            .run(["config", "--unset", "branch.main.pushRemote"])
+            .unwrap();
+        assert_eq!(
+            push_target(&client, None, None, &upstream_state).unwrap(),
+            Some(("fallback".into(), "main".into()))
+        );
+        client
+            .git()
+            .run(["config", "branch.main.merge", "refs/heads/release"])
+            .unwrap();
+        assert_eq!(
+            push_target(&client, None, None, &upstream_state).unwrap(),
+            Some(("fallback".into(), "main".into()))
+        );
+        client
+            .git()
+            .run(["config", "--unset", "remote.pushDefault"])
+            .unwrap();
+        assert!(push_target(&client, None, None, &upstream_state).is_err());
+        client
+            .git()
+            .run(["config", "push.default", "upstream"])
+            .unwrap();
+        assert_eq!(
+            push_target(&client, None, None, &upstream_state).unwrap(),
+            Some(("origin".into(), "release".into()))
+        );
+        client
+            .git()
+            .run(["config", "remote.pushDefault", "fallback"])
+            .unwrap();
+        assert!(push_target(&client, None, None, &upstream_state).is_err());
+        client
+            .git()
+            .run(["config", "--unset", "remote.pushDefault"])
+            .unwrap();
+        client
+            .git()
+            .run(["config", "branch.main.remote", "team/fork"])
+            .unwrap();
+        assert_eq!(
+            push_target(&client, None, None, &upstream_state).unwrap(),
+            Some(("team/fork".into(), "release".into()))
+        );
+        client
+            .git()
+            .run(["config", "push.default", "matching"])
+            .unwrap();
+        assert!(push_target(&client, None, None, &upstream_state).is_err());
+        assert_eq!(
+            push_target(&client, Some("origin"), Some("release"), &upstream_state).unwrap(),
+            Some(("origin".into(), "release".into()))
+        );
+        client
+            .git()
+            .run(["config", "--unset", "branch.main.merge"])
+            .unwrap();
+        client
+            .git()
+            .run(["config", "push.default", "current"])
+            .unwrap();
+        client
+            .git()
+            .run(["config", "push.autoSetupRemote", "true"])
+            .unwrap();
+        assert!(push_target(&client, None, None, &upstream_state).is_err());
+
         let malformed = OperationState {
+            branch: Some("main".into()),
             upstream: Some("missing-slash".into()),
             ..OperationState::default()
         };
         assert_eq!(pull_target(None, None, &malformed), None);
-        assert_eq!(push_target(None, None, &malformed), None);
     }
 
     #[test]
@@ -1903,9 +2455,9 @@ mod tests {
         assert_eq!(state.upstream.as_deref(), Some("origin/main"));
         let tracking = read_remote_tracking_refs(&client, None).unwrap();
         assert_eq!(tracking.len(), 3);
-        verify_fetch_refs(&client, None, &tracking).unwrap();
+        verify_fetch_refs(&client, None).unwrap();
         assert!(matches!(
-            verify_fetch_refs(&client, Some("missing"), &tracking),
+            verify_fetch_refs(&client, Some("missing")),
             Err(GitError::VerificationFailed(_))
         ));
         assert_eq!(
@@ -1915,5 +2467,408 @@ mod tests {
             Some(base.as_str())
         );
         assert!(read_remote_ref(&client, "missing", "refs/heads/main").is_err());
+    }
+
+    #[test]
+    fn remote_ref_lookup_requires_an_exact_ref_name() {
+        let temp = TempDir::new().unwrap();
+        let (_repo, client, base, _) = test_repository(temp.path());
+        let bare = GitClient::from_path(temp.path().join("origin.git"));
+        bare.git()
+            .run(["update-ref", "refs/heads/x/refs/heads/absent", &base])
+            .unwrap();
+
+        let advertised = client
+            .git()
+            .run_text(["ls-remote", "--heads", "--", "origin", "refs/heads/absent"])
+            .unwrap();
+        assert!(advertised.contains("refs/heads/x/refs/heads/absent"));
+        assert!(read_remote_ref(&client, "origin", "refs/heads/absent")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn fetch_verification_respects_a_narrow_remote_refspec() {
+        let temp = TempDir::new().unwrap();
+        let (_repo, client, base, _) = test_repository(temp.path());
+        let refspec = "+refs/heads/main:refs/remotes/origin/main";
+        client
+            .git()
+            .run(["config", "--replace-all", "remote.origin.fetch", refspec])
+            .unwrap();
+
+        let execution = execute_mutation(
+            &client,
+            &MutationRequest::Fetch {
+                remote: Some("origin".into()),
+            },
+            &OperationPreconditions::default(),
+        )
+        .unwrap();
+
+        assert!(execution.failure.is_none(), "{:?}", execution.failure);
+        assert_eq!(
+            execution.receipt.verification.status,
+            VerificationStatus::Verified
+        );
+        assert_eq!(
+            read_ref_oid(&client, "refs/remotes/origin/main")
+                .unwrap()
+                .as_deref(),
+            Some(base.as_str())
+        );
+        assert!(read_ref_oid(&client, "refs/remotes/origin/source")
+            .unwrap()
+            .is_none());
+
+        client
+            .git()
+            .run([
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ])
+            .unwrap();
+        client
+            .git()
+            .run([
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "^refs/heads/source",
+            ])
+            .unwrap();
+        let execution = execute_mutation(
+            &client,
+            &MutationRequest::Fetch {
+                remote: Some("origin".into()),
+            },
+            &OperationPreconditions::default(),
+        )
+        .unwrap();
+        assert!(execution.failure.is_none(), "{:?}", execution.failure);
+        assert!(read_ref_oid(&client, "refs/remotes/origin/source")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn fetch_all_ignores_skipped_remotes_and_fetch_prunes_selected_refs() {
+        let temp = TempDir::new().unwrap();
+        let (repo, client, base, source) = test_repository(temp.path());
+        let missing_remote = temp.path().join("missing.git");
+        repo.remote("skipped", missing_remote.to_str().unwrap())
+            .unwrap();
+        client
+            .git()
+            .run(["config", "remote.skipped.skipFetchAll", "true"])
+            .unwrap();
+        for (branch, commit_id) in [
+            ("main", base.clone()),
+            ("merged", base.clone()),
+            ("source", source),
+            ("gone", base),
+        ] {
+            repo.reference(
+                &format!("refs/remotes/origin/{branch}"),
+                commit_id,
+                true,
+                "test tracking ref",
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            verify_fetch_refs(&client, Some("origin")),
+            Err(GitError::VerificationFailed(message)) if message.contains("stale fetched ref")
+        ));
+
+        let execution = execute_mutation(
+            &client,
+            &MutationRequest::Fetch { remote: None },
+            &OperationPreconditions::default(),
+        )
+        .unwrap();
+
+        assert!(execution.failure.is_none(), "{:?}", execution.failure);
+        assert_eq!(
+            execution.receipt.verification.status,
+            VerificationStatus::Verified
+        );
+        assert!(read_ref_oid(&client, "refs/remotes/origin/gone")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn planning_rejects_chained_push_url_rewrites() {
+        let temp = TempDir::new().unwrap();
+        let (_repo, client, _, _) = test_repository(temp.path());
+        client
+            .git()
+            .run(["remote", "set-url", "origin", "one"])
+            .unwrap();
+        client
+            .git()
+            .run(["config", "url.two.insteadOf", "one"])
+            .unwrap();
+        client
+            .git()
+            .run(["config", "url.three.insteadOf", "two"])
+            .unwrap();
+
+        assert!(plan_mutation(
+            &client,
+            &MutationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("main".into()),
+            },
+            &OperationPreconditions::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn push_plan_uses_the_remote_name_when_push_url_has_credentials() {
+        let temp = TempDir::new().unwrap();
+        let (_repo, client, _, _) = test_repository(temp.path());
+        client
+            .git()
+            .run([
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                "https://user:token@example.invalid/repo",
+            ])
+            .unwrap();
+
+        let plan = plan_mutation(
+            &client,
+            &MutationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("main".into()),
+            },
+            &OperationPreconditions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.expected_remote_effects[0].target,
+            "origin/refs/heads/main"
+        );
+        assert!(!serde_json::to_string(&plan).unwrap().contains("token"));
+    }
+
+    #[test]
+    fn push_verifies_the_configured_path_with_spaces() {
+        let temp = TempDir::new().unwrap();
+        let (repo, client, base, _) = test_repository(temp.path());
+        let spaced_path = temp.path().join(" spaced.git ");
+        let spaced = clone_bare_repo(&temp.path().join("worktree"), &spaced_path);
+        let endpoint = spaced_path.to_str().unwrap();
+        client
+            .git()
+            .run(["remote", "set-url", "--push", "origin", endpoint])
+            .unwrap();
+        assert_eq!(resolve_push_endpoint(&client, "origin").unwrap(), endpoint);
+
+        write_file(&temp.path().join("worktree"), "update.txt", "next\n");
+        let next = commit_all(&repo, "advance main");
+        let execution = execute_mutation(
+            &client,
+            &MutationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("main".into()),
+            },
+            &OperationPreconditions::default(),
+        )
+        .unwrap();
+        assert!(execution.failure.is_none(), "{:?}", execution.failure);
+        assert_eq!(
+            execution.receipt.verification.status,
+            VerificationStatus::Verified
+        );
+        assert_eq!(
+            spaced.find_reference("refs/heads/main").unwrap().target(),
+            Some(next)
+        );
+        assert_eq!(
+            GitClient::from_path(temp.path().join("origin.git"))
+                .git()
+                .run_text(["rev-parse", "refs/heads/main"])
+                .unwrap()
+                .trim(),
+            base
+        );
+    }
+
+    #[test]
+    fn remote_mutation_rejects_unverifiable_destinations_without_exposing_credentials() {
+        let temp = TempDir::new().unwrap();
+        let (_repo, client, _, _) = test_repository(temp.path());
+        let error = resolve_push_endpoint(&client, "https://user:token@example.invalid/repo")
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("token"));
+        assert_eq!(resolve_push_endpoint(&client, ".").unwrap(), ".");
+
+        client
+            .git()
+            .run(["config", "url.rewrite.pushInsteadOf", "other"])
+            .unwrap();
+        assert_eq!(resolve_push_endpoint(&client, "one").unwrap(), "one");
+        client
+            .git()
+            .run([
+                "config",
+                "--replace-all",
+                "url.rewrite.pushInsteadOf",
+                "one",
+            ])
+            .unwrap();
+        assert!(resolve_push_endpoint(&client, "one").is_err());
+        client
+            .git()
+            .run(["config", "--unset", "url.rewrite.pushInsteadOf"])
+            .unwrap();
+
+        client
+            .git()
+            .run([
+                "remote",
+                "set-url",
+                "--add",
+                "--push",
+                "origin",
+                "first-destination",
+            ])
+            .unwrap();
+        client
+            .git()
+            .run([
+                "remote",
+                "set-url",
+                "--add",
+                "--push",
+                "origin",
+                "second-destination",
+            ])
+            .unwrap();
+        assert!(resolve_push_endpoint(&client, "origin").is_err());
+        client
+            .git()
+            .run(["config", "remotes.group", "origin another"])
+            .unwrap();
+        assert!(resolve_push_endpoint(&client, "group").is_err());
+    }
+
+    #[test]
+    fn implicit_push_rejects_unmodelled_modes_and_fetch_skip_uses_last_setting() {
+        let temp = TempDir::new().unwrap();
+        let (_repo, client, _, _) = test_repository(temp.path());
+        assert!(push_target(&client, None, None, &OperationState::default()).is_err());
+        let state = OperationState {
+            branch: Some("main".into()),
+            ..OperationState::default()
+        };
+        client
+            .git()
+            .run(["config", "push.default", "nothing"])
+            .unwrap();
+        assert!(push_target(&client, None, None, &state).is_err());
+        client
+            .git()
+            .run(["config", "push.default", "unrecognized"])
+            .unwrap();
+        assert!(push_target(&client, None, None, &state).is_err());
+        client
+            .git()
+            .run(["config", "push.default", "current"])
+            .unwrap();
+        client
+            .git()
+            .run([
+                "config",
+                "remote.origin.push",
+                "refs/heads/main:refs/heads/main",
+            ])
+            .unwrap();
+        assert!(push_target(&client, None, None, &state).is_err());
+
+        client
+            .git()
+            .run(["config", "remote.origin.skipFetchAll", "true"])
+            .unwrap();
+        client
+            .git()
+            .run(["config", "remote.origin.skipDefaultUpdate", "false"])
+            .unwrap();
+        assert!(!remote_skips_fetch_all(&client, "origin").unwrap());
+        client
+            .git()
+            .run(["config", "--add", "remote.origin.skipFetchAll", "true"])
+            .unwrap();
+        assert!(remote_skips_fetch_all(&client, "origin").unwrap());
+    }
+
+    #[test]
+    fn push_executes_only_the_planned_branch_when_git_defaults_to_matching() {
+        let temp = TempDir::new().unwrap();
+        let (repo, client, base, source) = test_repository(temp.path());
+        repo.reference(
+            "refs/remotes/origin/main",
+            base.clone(),
+            true,
+            "test tracking ref",
+        )
+        .unwrap();
+        set_upstream(&repo, "main", "origin/main");
+        crate::test_support::checkout_branch(&repo, "source");
+        write_file(
+            temp.path().join("worktree").as_path(),
+            "new-source.txt",
+            "new\n",
+        );
+        let updated_source = commit_all(&repo, "advance source");
+        crate::test_support::checkout_branch(&repo, "main");
+        client
+            .git()
+            .run(["config", "push.default", "matching"])
+            .unwrap();
+
+        let execution = execute_mutation(
+            &client,
+            &MutationRequest::Push {
+                remote: Some("origin".into()),
+                branch: Some("main".into()),
+            },
+            &OperationPreconditions::default(),
+        )
+        .unwrap();
+
+        assert!(execution.failure.is_none(), "{:?}", execution.failure);
+        assert_eq!(
+            execution.receipt.verification.status,
+            VerificationStatus::Verified
+        );
+        assert_eq!(
+            execution.plan.expected_remote_effects[0].target,
+            execution.receipt.confirmed_remote_effects[0].target
+        );
+        assert_eq!(
+            read_remote_ref(&client, "origin", "refs/heads/main")
+                .unwrap()
+                .as_deref(),
+            Some(base.as_str())
+        );
+        assert_eq!(
+            read_remote_ref(&client, "origin", "refs/heads/source")
+                .unwrap()
+                .as_deref(),
+            Some(source.as_str())
+        );
+        assert_ne!(updated_source, source);
     }
 }

@@ -190,9 +190,9 @@
   },
   "baseline_lock": {
     "git_object_format": "sha1",
-    "base_commit": "3237b69513c7d6daf805f0163cb4e72f5bab1cb8",
+    "base_commit": "a6f6e5c7f853c9917c4f5b64555a70b6e86fc4d1",
     "base_tree": "5497a69197a390f6c019a76d719d1c140f136630",
-    "policy_sha256": "2f02ca7650034ebc62e306f1965e6b5ba20337ce595952d30d96dac0ff1c4597",
+    "policy_sha256": "7377261d1527d246ea8cf365dc794fe9fec86ecb8087a3f3c59af4de5dd477d2",
     "specification_sha256": "c11c474de9c259ccd790ffff29f3b1af818f6abe5af4f44d98561d0fd8e12158"
   },
   "behavior": {

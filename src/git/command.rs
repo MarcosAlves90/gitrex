@@ -126,6 +126,7 @@ fn display_git_path(path: &[u8]) -> String {
 #[derive(Debug, Clone)]
 pub struct GitClient {
     discovery_path: PathBuf,
+    read_only: bool,
 }
 
 impl Default for GitClient {
@@ -137,7 +138,10 @@ impl Default for GitClient {
 impl GitClient {
     pub fn new() -> Self {
         let discovery_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self { discovery_path }
+        Self {
+            discovery_path,
+            read_only: false,
+        }
     }
 
     pub fn from_path(path: impl AsRef<Path>) -> Self {
@@ -150,15 +154,29 @@ impl GitClient {
                 .unwrap_or_else(|_| path.to_path_buf())
         };
 
-        Self { discovery_path }
+        Self {
+            discovery_path,
+            read_only: false,
+        }
     }
 
     pub fn discovery_path(&self) -> &Path {
         &self.discovery_path
     }
 
+    pub(crate) fn read_only(&self) -> Self {
+        Self {
+            discovery_path: self.discovery_path.clone(),
+            read_only: true,
+        }
+    }
+
     pub(crate) fn git(&self) -> super::GitProcess {
-        super::GitProcess::new(&self.discovery_path)
+        if self.read_only {
+            super::GitProcess::new_read_only(&self.discovery_path)
+        } else {
+            super::GitProcess::new(&self.discovery_path)
+        }
     }
 
     pub(crate) fn resolve_commit(&self, reference: &str) -> Result<String> {
@@ -789,6 +807,21 @@ impl GitClient {
         Ok(())
     }
 
+    pub(crate) fn delete_remote_branch_to_remote(&self, remote: &str, branch: &str) -> Result<()> {
+        let git = self.git();
+        git.ensure_repository()?;
+        git.run([
+            "push",
+            "--no-follow-tags",
+            "--recurse-submodules=no",
+            "--delete",
+            "--",
+            remote,
+            branch,
+        ])?;
+        Ok(())
+    }
+
     pub fn clone_repository(&self, repository: &str, directory: Option<&Path>) -> Result<()> {
         let git = self.git();
         let path = match directory {
@@ -849,6 +882,21 @@ impl GitClient {
                 git.run(["push", "--", remote, refspec.as_str()])?;
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn push_branch_to_remote(&self, remote: &str, branch: &str) -> Result<()> {
+        let git = self.git();
+        git.ensure_repository()?;
+        let refspec = format!("HEAD:refs/heads/{branch}");
+        git.run([
+            "push",
+            "--no-follow-tags",
+            "--recurse-submodules=no",
+            "--",
+            remote,
+            refspec.as_str(),
+        ])?;
         Ok(())
     }
 }
